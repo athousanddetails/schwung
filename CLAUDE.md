@@ -346,8 +346,21 @@ Each of the 4 slots has:
 - **Receive channel**: 1–4 (default) or All (−1)
 - **Forward channel**: 1–16 or −1 (auto: remap to receive ch, or passthrough if receive=All) or −2 (THRU: preserve original ch). Modules can declare `default_forward_channel` in capabilities.
 - **Volume**, **state persistence** (synth + FX + MIDI FX).
+- **HiJack**: replace Move's own engine on the matching track (below).
 
 **MPE controllers** (LinnStrument, Roli, Sensel): set Receive=All, Forward=THRU, enable MPE in the synth. Otherwise channel remap destroys per-note bend/pressure/slide.
+
+### HiJack
+
+Per-slot switch (`slot:hijack`, in both settings screens) that lets slot N replace Move's engine on **track N** while Move's sequencer, scales and pads keep driving it. Four independent switches; needs no module changes. Three effects, all shim + shadow UI:
+
+1. The slot is **exempt from the D-Bus track-volume sync** (`shadow_dbus.c`), so pulling Move's track fader to −inf silences Move's own instrument without dragging the Schwung slot down with it. Muting the track would kill its MIDI too — the fader does not, which is why HiJack uses it.
+2. On enable, a **one-shot action** drives that fader down for the user: `master_fx:hijack_zero` = slot index. Move has no volume setter (no D-Bus object, no web API, it owns `Song.abl` in memory), so the shim plays Move's own UI through `/schwung-midi-inject` — hold track CC (43−N), pump encoder detents, release.
+3. While that track's button is held, **CC 79 goes to the slot**, not to Move, with an on-screen level overlay (`master_fx:hijack_active` tells shadow_ui which slot).
+
+**The gesture is deliberately not bound to the state.** Setting `slot:hijack` is inert; only a user toggle fires `hijack_zero`. When the two were one param, every path that restored the state replayed the gesture — a boot silently re-pumped 400 detents into Move. The pump also checks every push and retries, with a frame timeout that still guarantees the release: a lost release leaves Move believing a track button is held, sticking its volume overlay on screen until reboot.
+
+Persists as `hijack` per slot in `shadow_chain_config.json` (and `slot_hijack` in the global state file), so it travels with the set through the ordinary chain-config path. Pinned by `tests/host/test_hijack_per_slot_hooks.sh`. Full mechanism, measurements and dead ends: `docs/HIJACK.md`.
 
 ### User Presets
 
@@ -500,6 +513,7 @@ Release: bump `src/module.json` version → commit → `git tag v0.2.0 && git pu
 - `docs/REALTIME_SAFETY.md` — RT rules and JACK glitch root causes
 - `docs/MIDI_INJECTION.md` — Cable-2 injection / echo filter history
 - `docs/ADDRESSING_MOVE_SYNTHS.md` — Sending MIDI to Move tracks/slot synths from tools, overtake modules, chain MIDI FX. Ref: `src/modules/tools/seq-test/`.
+- `docs/HIJACK.md` — HiJack: running a Schwung slot in place of Move's engine on a track. State/gesture split, persistence, measured dead ends.
 - `../schwung-catalog-site/manual.html` — User-facing manual (canonical, lives in the catalog-site repo)
 - `BUILDING.md` — Build system, cross-compilation
 

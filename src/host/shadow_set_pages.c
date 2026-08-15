@@ -131,7 +131,7 @@ static void seed_empty_set_state(const char *set_dir) {
         for (int i = 0; i < SHADOW_CHAIN_INSTANCES; i++) {
             fprintf(f,
                 "    { \"name\": \"\", \"channel\": %d, \"volume\": 1.0, "
-                "\"forward_channel\": -1, \"muted\": 0, \"soloed\": 0 }%s\n",
+                "\"forward_channel\": -1, \"muted\": 0, \"soloed\": 0, \"hijack\": 0 }%s\n",
                 i + 1, (i < SHADOW_CHAIN_INSTANCES - 1) ? "," : "");
         }
         fputs("  ]\n}\n", f);
@@ -217,10 +217,11 @@ void shadow_save_config_to_dir(const char *dir) {
         int display_fwd = host.chain_slots[i].forward_channel >= 0
             ? host.chain_slots[i].forward_channel + 1
             : host.chain_slots[i].forward_channel;
-        fprintf(f, "    {\"name\": \"%s\", \"channel\": %d, \"volume\": %.3f, \"forward_channel\": %d, \"muted\": %d, \"soloed\": %d}%s\n",
+        fprintf(f, "    {\"name\": \"%s\", \"channel\": %d, \"volume\": %.3f, \"forward_channel\": %d, \"muted\": %d, \"soloed\": %d, \"hijack\": %d}%s\n",
                 host.chain_slots[i].patch_name, display_ch,
                 host.chain_slots[i].volume, display_fwd,
                 host.chain_slots[i].muted, host.chain_slots[i].soloed,
+                host.chain_slots[i].hijacked,
                 i < SHADOW_CHAIN_INSTANCES - 1 ? "," : "");
     }
     fprintf(f, "  ]\n}\n");
@@ -310,6 +311,17 @@ int shadow_load_config_from_dir(const char *dir) {
             if (soloed_colon) {
                 host.chain_slots[i].soloed = atoi(soloed_colon + 1);
                 if (host.chain_slots[i].soloed) (*host.solo_count)++;
+            }
+        }
+        /* Clear first: this loader does NOT run shadow_chain_defaults(), so a
+         * config written before HiJack (no "hijack" key) would otherwise leave
+         * the previous set's flag standing and hijack the wrong track. */
+        host.chain_slots[i].hijacked = 0;
+        char *hijack_pos = strstr(name_pos, "\"hijack\"");
+        if (hijack_pos) {
+            char *hijack_colon = strchr(hijack_pos, ':');
+            if (hijack_colon) {
+                host.chain_slots[i].hijacked = atoi(hijack_colon + 1) ? 1 : 0;
             }
         }
     }

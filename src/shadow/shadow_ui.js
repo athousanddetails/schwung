@@ -1373,6 +1373,7 @@ function checkForUpdatesInBackground() {
 /* Chain settings (shown when Settings component is selected) */
 const CHAIN_SETTINGS_ITEMS = [
     { key: "knobs", label: "Knobs", type: "action" },  // Opens knob assignment editor
+    { key: "hijack", label: "HiJack", type: "int", min: 0, max: 1, step: 1 },  // slot replaces Move's engine on the matching track
     { key: "slot:volume", label: "Volume", type: "float", min: 0, max: 4, step: 0.05 },
     { key: "slot:muted", label: "Muted", type: "int", min: 0, max: 1, step: 1 },
     { key: "slot:soloed", label: "Soloed", type: "int", min: 0, max: 1, step: 1 },
@@ -3944,7 +3945,8 @@ function saveChainConfigToDir(dir) {
             const fwd = parseInt(getSlotParam(i, "slot:forward_channel") || "-1");
             const muted = parseInt(getSlotParam(i, "slot:muted") || "0");
             const soloed = parseInt(getSlotParam(i, "slot:soloed") || "0");
-            cfgSlots.push({ name: slots[i] ? slots[i].name : "", channel: ch, volume: vol, forward_channel: fwd, muted: muted, soloed: soloed });
+            const hijack = parseInt(getSlotParam(i, "slot:hijack") || "0");
+            cfgSlots.push({ name: slots[i] ? slots[i].name : "", channel: ch, volume: vol, forward_channel: fwd, muted: muted, soloed: soloed, hijack: hijack });
         }
         host_write_file(path, JSON.stringify({ slots: cfgSlots }, null, 2) + "\n");
     } catch (e) {
@@ -4125,6 +4127,13 @@ function loadChainConfigFromDir(dir) {
             if (typeof s.forward_channel === "number") setSlotParamWithTimeout(i, "slot:forward_channel", String(s.forward_channel), 500);
             if (typeof s.muted === "number") setSlotParamWithTimeout(i, "slot:muted", String(s.muted), 500);
             if (typeof s.soloed === "number") setSlotParamWithTimeout(i, "slot:soloed", String(s.soloed), 500);
+            /* Always write hijack, like receive_channel above: a config saved
+             * before HiJack existed has no field, and silently skipping would
+             * leave the previous set's slot still hijacked. Restoring the flag
+             * is all this does — the fader gesture is a separate action that
+             * only a user toggle fires. */
+            setSlotParamWithTimeout(i, "slot:hijack",
+                String((typeof s.hijack === "number") ? s.hijack : 0), 500);
         }
         debugLog("SET_CHANGED: loaded chain config from " + path);
     } catch (e) {
@@ -6853,9 +6862,54 @@ function isSlotMpeMode(slot) {
 /* State to restore when MPE mode is turned off */
 const chainMpePreState = [null, null, null, null];
 
+/* HiJack: a per-slot switch (slot N replaces Move's engine on track N). The
+ * flag lives on the chain slot as slot:hijack, so it persists and travels with
+ * the set through the ordinary chain-config path — no side file, and nothing
+ * that restores it performs a gesture.
+ *
+ * Turning it ON additionally fires master_fx:hijack_zero, a separate one-shot
+ * action that drives Move's own track fader to -inf. That split is deliberate:
+ * an earlier build performed the gesture as a side effect of setting the state,
+ * so restoring the state at boot re-pumped 400 detents into Move. */
+function isSlotHijacked(slot) {
+    return parseInt(getSlotParam(slot, "slot:hijack")) === 1;
+}
+
+/* Toggle HiJack on a slot: set the flag, rescue the level, then ask for the
+ * one-shot fader gesture.
+ *
+ * BLOCKING writes, not fire-and-forget. This is a discrete multi-field commit
+ * over the single shadow_param SHM slot, so back-to-back non-blocking writes
+ * clobber each other — see shadowSetParamBlocking's comment. Measured
+ * 2026-08-15 on device: with plain setSlotParam, the hijack_zero write (last of
+ * the three) reached the shim on roughly one toggle in six, so HiJack switched
+ * on but Move's fader stayed up. */
+function setSlotHijack(slot, on) {
+    if (!on) {
+        shadowSetParamBlocking(slot, "slot:hijack", "0");
+        return;
+    }
+    shadowSetParamBlocking(slot, "slot:hijack", "1");
+    /* Normalise to unity on enable. SET, never add — an additive bump would
+     * stack to 200% on a second toggle. Already at unity is left alone;
+     * anything else is almost certainly a leftover from the fader sync we are
+     * now disabling, not a deliberate mix level. */
+    const vol = parseFloat(getSlotParam(slot, "slot:volume"));
+    if (!Number.isFinite(vol) || vol < 0.99 || vol > 1.01) {
+        shadowSetParamBlocking(slot, "slot:volume", "1.0");
+    }
+    /* One-shot: silence Move's own engine on this track. Only ever fired from
+     * a user toggle, never from a restore path. Last, so the state and level
+     * are already committed when the gesture starts. */
+    shadowSetParamBlocking(slot, "master_fx:hijack_zero", String(slot));
+}
+
 function getChainSettingValue(slot, setting) {
     if (setting.key === "mpe_mode") {
         return isSlotMpeMode(slot) ? "On" : "Off";
+    }
+    if (setting.key === "hijack") {
+        return isSlotHijacked(slot) ? "On" : "Off";
     }
     const val = getSlotParam(slot, setting.key);
     if (val === null) return "-";
@@ -6894,6 +6948,16 @@ function getChainSettingValue(slot, setting) {
 /* Adjust a chain setting value */
 function adjustChainSetting(slot, setting, delta) {
     if (setting.type === "action") return;
+
+    /* HiJack toggle — per slot, so all four can be on at once. Turning it off
+     * only restores the fader sync; Move's own fader stays where the user (or
+     * the enable gesture) left it, which is theirs to raise. */
+    if (setting.key === "hijack") {
+        const on = isSlotHijacked(slot);
+        if (delta > 0 && !on) setSlotHijack(slot, true);
+        else if (delta < 0 && on) setSlotHijack(slot, false);
+        return;
+    }
 
     /* MPE Mode toggle: sets recv/fwd/synth MPE in one action */
     if (setting.key === "mpe_mode") {
@@ -13262,6 +13326,10 @@ function drawHelpDetail() {
     _ctx.setView = setView;
     _ctx.getSlotParam = getSlotParam;
     _ctx.setSlotParam = setSlotParam;
+    /* Blocking variant, for view modules committing several params at once —
+     * back-to-back non-blocking writes share one shadow_param slot and clobber
+     * each other. */
+    _ctx.setSlotParamBlocking = shadowSetParamBlocking;
     _ctx.updateFocusedSlot = updateFocusedSlot;
     _ctx.getMasterFxDisplayName = () => getMasterFxDisplayName();
     _ctx.saveSlotsToConfig = (...args) => saveSlotsToConfig(...args);
@@ -15146,6 +15214,29 @@ globalThis.tick = function() {
 };
 
 globalThis.onMidiMessageInternal = function(data) {
+    /* HiJack volume overlay. The shim forwards CC 79 only while a hijacked
+     * slot's track button is held; it has already applied the delta to the
+     * slot and blocked the CC from Move, so this is display only. */
+    {
+        const _s = data[0], _d1 = data[1];
+        if ((_s & 0xF0) === 0xB0 && _d1 === 79) {
+            /* Which slot the gesture belongs to comes from the shim, not from
+             * the CC — with four independent switches the message alone cannot
+             * say. -1 means no gesture is in flight, in which case this is an
+             * ordinary CC 79 and must fall through to the normal handling. */
+            const hj = parseInt(getSlotParam(0, "master_fx:hijack_active"));
+            if (Number.isFinite(hj) && hj >= 0) {
+                const v = parseFloat(getSlotParam(hj, "slot:volume"));
+                const pct = Number.isFinite(v) ? Math.round(v * 100) : 0;
+                /* ~0.7s instead of the 240-tick (~4s) default: this tracks a knob
+                 * being turned, so it should clear almost as soon as you stop. */
+                showOverlay(`Slot ${hj + 1} Vol`, `${pct}%`, 40);
+                needsRedraw = true;
+                return;
+            }
+        }
+    }
+
     const status = data[0];
     const d1 = data[1];
     const d2 = data[2];

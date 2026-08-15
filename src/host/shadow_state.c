@@ -222,11 +222,16 @@ void shadow_save_state(void)
             host_chain_slots[1].muted,
             host_chain_slots[2].muted,
             host_chain_slots[3].muted);
-    fprintf(f, "  \"slot_soloed\": [%d, %d, %d, %d]\n",
+    fprintf(f, "  \"slot_soloed\": [%d, %d, %d, %d],\n",
             host_chain_slots[0].soloed,
             host_chain_slots[1].soloed,
             host_chain_slots[2].soloed,
             host_chain_slots[3].soloed);
+    fprintf(f, "  \"slot_hijack\": [%d, %d, %d, %d]\n",
+            host_chain_slots[0].hijacked,
+            host_chain_slots[1].hijacked,
+            host_chain_slots[2].hijacked,
+            host_chain_slots[3].hijacked);
     fprintf(f, "}\n");
     fclose(f);
     chown_to_ableton(SHADOW_CONFIG_PATH);
@@ -406,6 +411,28 @@ void shadow_load_state(void)
                 char msg[128];
                 snprintf(msg, sizeof(msg), "Loaded slot soloed: [%d, %d, %d, %d]",
                          s0, s1, s2, s3);
+                if (host_log) host_log(msg);
+            }
+        }
+    }
+
+    /* Parse slot_hijack array. Restoring the flag is all that happens here —
+     * driving Move's fader is a separate one-shot action, so a boot can never
+     * replay the gesture. */
+    const char *hijack_key = "\"slot_hijack\":";
+    char *hijack_pos = strstr(json, hijack_key);
+    if (hijack_pos) {
+        hijack_pos = strchr(hijack_pos, '[');
+        if (hijack_pos) {
+            int h0, h1, h2, h3;
+            if (sscanf(hijack_pos, "[%d, %d, %d, %d]", &h0, &h1, &h2, &h3) == 4) {
+                int hj[4] = {h0, h1, h2, h3};
+                for (int i = 0; i < 4; i++) {
+                    host_chain_slots[i].hijacked = hj[i] ? 1 : 0;
+                }
+                char msg[128];
+                snprintf(msg, sizeof(msg), "Loaded slot hijack: [%d, %d, %d, %d]",
+                         h0, h1, h2, h3);
                 if (host_log) host_log(msg);
             }
         }

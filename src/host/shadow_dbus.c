@@ -280,7 +280,15 @@ static void shadow_dbus_handle_text(const char *text)
     if (strncmp(text, "Track Volume ", 13) == 0) {
         float volume = shadow_parse_volume_db(text);
         int held = *host.held_track;
-        if (volume >= 0.0f && held >= 0 && held < SHADOW_CHAIN_INSTANCES) {
+        /* A hijacked slot deliberately ignores this sync. Move's track fader is
+         * how the user silences Move's OWN instrument on that track; slaving the
+         * Schwung slot to it would mute the replacement synth at the same time,
+         * which is exactly what makes the "Schwung synth on a Move track" setup
+         * impossible without the dummy-sampler workaround. Per slot, so tracks
+         * 1 and 3 can be hijacked while 2 and 4 keep following their faders. */
+        int hijacked = (held >= 0 && held < SHADOW_CHAIN_INSTANCES &&
+                        host.chain_slots[held].hijacked);
+        if (volume >= 0.0f && held >= 0 && held < SHADOW_CHAIN_INSTANCES && !hijacked) {
             if (!host.chain_slots[held].muted) {
                 /* Update the held track's slot volume (skip if muted) */
                 host.chain_slots[held].volume = volume;

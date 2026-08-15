@@ -26,6 +26,7 @@ import {
 export const SLOT_SETTINGS = [
     { key: "patch", label: "Patch", type: "action" },
     { key: "chain", label: "Edit Chain", type: "action" },
+    { key: "hijack", label: "HiJack", type: "int", min: 0, max: 1, step: 1 },  // slot replaces Move's engine on the matching track
     { key: "slot:volume", label: "Volume", type: "float", min: 0, max: 4, step: 0.05 },
     { key: "slot:muted", label: "Muted", type: "int", min: 0, max: 1, step: 1 },
     { key: "slot:soloed", label: "Soloed", type: "int", min: 0, max: 1, step: 1 },
@@ -58,6 +59,9 @@ export function getSlotSettingValue(slot, setting) {
     }
     if (setting.key === "mpe_mode") {
         return isSlotMpe(slot) ? "On" : "Off";
+    }
+    if (setting.key === "hijack") {
+        return parseInt(getSlotParam(slot, "slot:hijack")) === 1 ? "On" : "Off";
     }
     const val = getSlotParam(slot, setting.key);
     if (val === null) return "-";
@@ -101,6 +105,38 @@ function adjustSlotSetting(slot, setting, delta) {
     if (setting.type === "action") return;
 
     const { getSlotParam, setSlotParam } = ctx;
+
+    /* HiJack toggle — mirrors the handler in shadow_ui.js's chain settings;
+     * both screens expose the same per-slot switch, and adding it to only one
+     * means the row is missing from whichever screen the user is looking at.
+     *
+     * Enable = set the flag, rescue the level, then fire the SEPARATE one-shot
+     * master_fx:hijack_zero action that drives Move's own track fader to -inf.
+     * Nothing but a user toggle may fire that action: when the gesture was a
+     * side effect of setting the state, every restore replayed it. */
+    if (setting.key === "hijack") {
+        /* Blocking writes: this is a discrete multi-field commit over the one
+         * shadow_param SHM slot, and back-to-back non-blocking writes clobber
+         * each other — measured on device, the hijack_zero write landed on
+         * about one toggle in six. */
+        const setBlocking = ctx.setSlotParamBlocking || setSlotParam;
+        const on = parseInt(getSlotParam(slot, "slot:hijack")) === 1;
+        if (delta > 0 && !on) {
+            setBlocking(slot, "slot:hijack", "1");
+            /* Normalise to unity on enable. SET, never add — an additive
+             * bump would stack to 200% on a second toggle. Already at unity is
+             * left alone; anything else is almost certainly a leftover from the
+             * fader sync we are now disabling, not a deliberate mix level. */
+            const vol = parseFloat(getSlotParam(slot, "slot:volume"));
+            if (!Number.isFinite(vol) || vol < 0.99 || vol > 1.01) {
+                setBlocking(slot, "slot:volume", "1.0");
+            }
+            setBlocking(slot, "master_fx:hijack_zero", String(slot));
+        } else if (delta < 0 && on) {
+            setBlocking(slot, "slot:hijack", "0");
+        }
+        return;
+    }
 
     /* MPE Mode toggle: sets recv/fwd/synth MPE in one action */
     if (setting.key === "mpe_mode") {

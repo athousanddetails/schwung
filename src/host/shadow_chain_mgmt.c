@@ -426,6 +426,7 @@ void shadow_chain_defaults(void) {
         shadow_chain_slots[i].soloed = 0;
         shadow_chain_slots[i].forward_channel = -1;
         shadow_chain_slots[i].transpose = 0;
+        shadow_chain_slots[i].hijacked = 0;
         capture_clear(&shadow_chain_slots[i].capture);
         shadow_chain_slots[i].fade.gain = 0.0f;
         shadow_chain_slots[i].fade.target = 0.0f;
@@ -546,6 +547,16 @@ void shadow_chain_load_config(void) {
             if (soloed_colon) {
                 shadow_chain_slots[i].soloed = atoi(soloed_colon + 1);
                 if (shadow_chain_slots[i].soloed) shadow_solo_count++;
+            }
+        }
+
+        /* Parse hijack (0 or 1). Absent in configs written before HiJack — the
+         * defaults pass above already left it 0, so old sets simply stay off. */
+        char *hijack_pos = strstr(name_pos, "\"hijack\"");
+        if (hijack_pos) {
+            char *hijack_colon = strchr(hijack_pos, ':');
+            if (hijack_colon) {
+                shadow_chain_slots[i].hijacked = atoi(hijack_colon + 1) ? 1 : 0;
             }
         }
     }
@@ -1664,6 +1675,15 @@ int shadow_handle_slot_param_set(int slot, const char *key, const char *value) {
         shadow_ui_state_update_slot(slot);
         return 1;
     }
+    if (strcmp(key, "slot:hijack") == 0) {
+        /* Pure state, deliberately inert. Driving Move's track fader to -inf is
+         * a SEPARATE one-shot action (master_fx:hijack_zero) precisely so that
+         * every path which restores this flag — boot, set change, chain config
+         * load — can never replay the gesture. */
+        shadow_chain_slots[slot].hijacked = atoi(value) ? 1 : 0;
+        shadow_ui_state_update_slot(slot);
+        return 1;
+    }
     return 0;
 }
 
@@ -1689,6 +1709,9 @@ int shadow_handle_slot_param_get(int slot, const char *key, char *buf, int buf_l
     }
     if (strcmp(key, "slot:transpose") == 0) {
         return snprintf(buf, buf_len, "%d", shadow_chain_slots[slot].transpose);
+    }
+    if (strcmp(key, "slot:hijack") == 0) {
+        return snprintf(buf, buf_len, "%d", shadow_chain_slots[slot].hijacked);
     }
     if (strcmp(key, "active_set") == 0) {
         /* Return "uuid\nname" for UI thread to write active_set.txt */
@@ -2474,6 +2497,8 @@ void shadow_inprocess_handle_param_request(void) {
         /* Delegate shim-specific params (resample_bridge, link_audio_*, jack:*, suspend_overtake) */
         if (!has_slot_prefix && host.handle_param_special) {
             if (strcmp(param_key, "resample_bridge") == 0 ||
+                strcmp(param_key, "hijack_zero") == 0 ||
+                strcmp(param_key, "hijack_active") == 0 ||
                 strcmp(param_key, "link_audio_routing") == 0 ||
                 strcmp(param_key, "link_audio_publish") == 0 ||
                 strcmp(param_key, "latency_comp_enabled") == 0 ||

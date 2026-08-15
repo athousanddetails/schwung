@@ -38,6 +38,12 @@ typedef struct shadow_chain_slot_t {
     int muted;              /* 1 = muted (Mute+Track or Move speakerOn sync) */
     int soloed;             /* 1 = soloed (Shift+Mute+Track or Move solo-cue sync) */
     int feedback_hold;      /* 1 = booted muted as a line-input feedback guard; JS clears once jack state is safe */
+    int hijacked;           /* 1 = HiJack: this slot replaces Move's engine on the matching track.
+                             * Exempts the slot from the D-Bus track-volume sync so the user can pull
+                             * Move's track fader to -inf (silencing Move's own instrument, without
+                             * muting the track and losing its MIDI) while the slot keeps playing, and
+                             * hands the track's volume encoder to the slot. Pure state: setting it
+                             * never moves Move's fader — that is the separate hijack_zero action. */
     int forward_channel;    /* -2 = passthrough, -1 = auto, 0-15 = forward MIDI to this channel */
     int transpose;          /* semitone offset applied to incoming note-on/off/poly-AT, range -12..+12 */
     char patch_name[64];

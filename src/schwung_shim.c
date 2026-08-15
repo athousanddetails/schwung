@@ -641,6 +641,80 @@ static volatile int shadow_selected_slot = 0;
 /* Mute button hold state: 1 while CC 88 is held, 0 when released */
 static volatile int shadow_mute_held = 0;
 
+/* ---------------------------------------------------------------------------
+ * HiJack
+ *
+ * A per-slot switch: slot N replaces Move's own engine on track N, while Move's
+ * sequencer, scales and pads keep driving it. The state itself lives on the
+ * chain slot (shadow_chain_slots[N].hijacked) so it persists through the normal
+ * chain-config path; only the transient gesture machinery is here.
+ *
+ * Four independent switches, not one global index — tracks 1 and 3 can be
+ * hijacked while 2 and 4 keep following their faders.
+ * ------------------------------------------------------------------------- */
+
+/* Is slot N hijacked? Slot N is bound to track N, so this doubles as the
+ * "is the held track hijacked" test. */
+static inline int hijack_slot_is_on(int slot) {
+    return slot >= 0 && slot < SHADOW_CHAIN_INSTANCES &&
+           shadow_chain_slots[slot].hijacked;
+}
+
+/* Slot whose volume gesture currently owns the OLED, or -1. Read by shadow_ui
+ * (master_fx:hijack_active) so the overlay knows which slot to draw without
+ * needing its own copy of the held-track state. */
+static volatile int hijack_gesture_slot = -1;
+
+/* Set while HiJack has forced the shadow display on for a track-hold + volume
+ * gesture, so shadow_swap_display() knows to keep the screen and to hand it
+ * back when the track button is released. */
+static volatile int hijack_display_asserted = 0;
+static volatile int hijack_display_was_on = 0;
+
+/* HiJack auto-zero: drive Move's own track fader to -inf by playing its UI —
+ * hold the track button, spin the volume encoder down, release.
+ *
+ * This is a ONE-SHOT ACTION, deliberately not bound to the hijack flag. Binding
+ * it to the state meant every path that restored the state re-performed the
+ * gesture (a boot would silently pump 400 detents into Move), so state restore
+ * and gesture are separate by construction.
+ *
+ * The inject ring holds 64 packets and one burst of 24 detents only reaches
+ * about -20 dB, so the descent is spread across frames. The phases exist so a
+ * full ring is a retry rather than a dropped packet: a lost RELEASE leaves Move
+ * believing a track button is held, which sticks its volume overlay on screen
+ * until reboot.
+ *
+ * PACE THIS TO THE DRAIN, NOT TO THE RING. shadow_midi_drain_injected() can
+ * place at most ONE packet per frame — it writes only at MIDI_IN offset 0 and
+ * bails the moment it would write past a pre-existing event — and it refuses to
+ * drain at all while any hardware MIDI is present, which includes the user's own
+ * finger on the encoder they just toggled HiJack with. Pushing faster than that
+ * only overflows the ring: measured 2026-08-15, a 6-per-frame pump filled all 64
+ * slots, every later push failed, and the gesture burned its whole budget
+ * without Move ever reaching -inf. One per frame keeps the ring near empty, so
+ * ordering holds and the RELEASE always finds a slot. */
+enum {
+    HIJACK_ZERO_IDLE = 0,
+    HIJACK_ZERO_HOLD,     /* push the track-button hold */
+    HIJACK_ZERO_PUMP,     /* push encoder detents until the counter drains */
+    HIJACK_ZERO_RELEASE   /* push the track-button release */
+};
+#define HIJACK_ZERO_DETENTS    400
+#define HIJACK_ZERO_PER_FRAME  1
+/* ~8.7 s at a 2.9 ms frame. 400 detents need 400 idle frames (~1.2 s); the rest
+ * of the budget absorbs the stalls while the user is still touching the surface.
+ * Past this the injection path is not recovering, so stop pumping and spend what
+ * is left on the release. */
+#define HIJACK_ZERO_MAX_FRAMES   3000
+/* Frames to keep retrying the release after that, before giving up entirely. */
+#define HIJACK_ZERO_RELEASE_GRACE 600
+
+static volatile int hijack_zero_phase = HIJACK_ZERO_IDLE;
+static volatile int hijack_zero_detents_left = 0;
+static volatile int hijack_zero_frames = 0;
+static volatile uint8_t hijack_zero_track_cc = 0;
+
 /* Set detection globals now in shadow_set_pages.c (extern via shadow_set_pages.h):
  * sampler_set_tempo, sampler_current_set_name, sampler_current_set_uuid,
  * sampler_last_song_index, sampler_pending_song_index, sampler_pending_set_seq */
@@ -3285,7 +3359,24 @@ static void shadow_swap_display(void)
     if (!shadow_volume_knob_touched) {
         shadow_block_plain_volume_hide_until_release = 0;
     }
-    if (shadow_volume_knob_touched && !shadow_shift_held) {
+    /* HiJack gesture finished (track button released, or its slot un-hijacked
+     * mid-gesture) — hand the OLED back. */
+    if (hijack_display_asserted && !hijack_slot_is_on(shadow_held_track)) {
+        hijack_display_asserted = 0;
+        hijack_gesture_slot = -1;
+        /* Only take the screen away if WE turned it on. */
+        if (!hijack_display_was_on) {
+            shadow_display_mode = 0;
+            shadow_control->display_mode = 0;
+            display_phase = 0;
+            return;
+        }
+    }
+
+    /* During a HiJack volume gesture the shadow UI keeps the screen: the whole
+     * point is to show the Schwung slot's level instead of Move's track fader,
+     * which is not moving because we filtered the CC. */
+    if (shadow_volume_knob_touched && !shadow_shift_held && !hijack_display_asserted) {
         if (shadow_block_plain_volume_hide_until_release) {
             /* Keep shadow UI visible until shortcut's volume touch is fully released. */
             if (display_hidden_for_volume) {
@@ -3705,6 +3796,64 @@ static int shim_handle_param_special(uint8_t req_type, uint32_t req_id) {
                 shadow_param->result_len = snprintf(shadow_param->value,
                     SHADOW_PARAM_VALUE_LEN, "%d", mode);
                 shadow_param->error = 0;
+            }
+            return 1;
+        }
+        /* master_fx:hijack_zero — ACTION, not state. Value is the track/slot to
+         * silence (0..3); writing it once drives Move's own track fader to -inf.
+         *
+         * Move exposes no setter for track volume (no D-Bus object, no web API,
+         * and it owns Song.abl in memory), so we drive its own UI: hold the
+         * track button, spin the volume encoder all the way down, release. Move
+         * makes the change itself, so it persists and displays correctly.
+         *
+         * Injected packets land in the shadow buffer Move reads, while the
+         * shim's own long-press and HiJack-knob detectors read the HARDWARE
+         * buffer — so this cannot trip our own shortcuts.
+         *
+         * Keeping this off the hijack flag is the whole point: the UI fires it
+         * on the toggle, and nothing that merely restores state can perform it.
+         * Reads back the phase so the caller can tell a gesture is in flight. */
+        if (strcmp(fx_key, "hijack_zero") == 0) {
+            if (req_type == 1) {
+                int val = atoi(shadow_param->value);
+                /* Ignore a second request while one is still running: the ring
+                 * would interleave two holds and neither release would match. */
+                if (val >= 0 && val < SHADOW_CHAIN_INSTANCES &&
+                    hijack_zero_phase == HIJACK_ZERO_IDLE && shadow_midi_inject_shm) {
+                    /* Track CCs are reversed: CC43 = Track 1, so slot N -> 43-N. */
+                    hijack_zero_track_cc     = (uint8_t)(43 - val);
+                    hijack_zero_detents_left = HIJACK_ZERO_DETENTS;
+                    hijack_zero_frames       = 0;
+                    hijack_zero_phase        = HIJACK_ZERO_HOLD;
+                    shadow_log("HiJack: driving Move's track fader to -inf");
+                }
+                shadow_param->error = 0;
+                shadow_param->result_len = 0;
+            } else if (req_type == 2) {
+                /* "<phase>,<detents_left>,<frames>" — the pump cannot log (SPI
+                 * path), so this read-back is the only way to see whether a
+                 * gesture stalled and where. Phase alone is not enough: a pump
+                 * starved by a full ring and one that finished normally both
+                 * end at 0. */
+                shadow_param->result_len = snprintf(shadow_param->value,
+                    SHADOW_PARAM_VALUE_LEN, "%d,%d,%d",
+                    hijack_zero_phase, hijack_zero_detents_left, hijack_zero_frames);
+                shadow_param->error = 0;
+            }
+            return 1;
+        }
+        /* master_fx:hijack_active — read-only: slot whose volume gesture owns
+         * the OLED right now, or -1. Lets shadow_ui draw the level overlay for
+         * the right slot without duplicating the held-track state. */
+        if (strcmp(fx_key, "hijack_active") == 0) {
+            if (req_type == 2) {
+                shadow_param->result_len = snprintf(shadow_param->value,
+                    SHADOW_PARAM_VALUE_LEN, "%d", hijack_gesture_slot);
+                shadow_param->error = 0;
+            } else {
+                shadow_param->error = 0;
+                shadow_param->result_len = 0;
             }
             return 1;
         }
@@ -5638,6 +5787,57 @@ static void shim_post_transfer(void *ctx, uint8_t *shadow, const uint8_t *hw, in
     /* Root span for the post-ioctl half of the SPI frame. */
     TRACE_SCOPE("spi.post");
 
+    /* HiJack auto-zero pump — a few detents per frame so the ring never
+     * overflows and Move's UI can follow, then release the held track button.
+     * Every push is checked: a full ring retries next frame instead of dropping
+     * the packet, and the release is guaranteed to be attempted even when the
+     * pump is abandoned, because a lost release leaves Move believing a track
+     * button is held and sticks its volume overlay on screen until reboot. */
+    if (hijack_zero_phase != HIJACK_ZERO_IDLE) {
+        if (!shadow_midi_inject_shm) {
+            hijack_zero_phase = HIJACK_ZERO_IDLE;
+        } else {
+            hijack_zero_frames++;
+            if (hijack_zero_frames == HIJACK_ZERO_MAX_FRAMES &&
+                hijack_zero_phase != HIJACK_ZERO_RELEASE) {
+                /* Jammed. Stop pumping and spend what is left on the release. */
+                hijack_zero_detents_left = 0;
+                hijack_zero_phase = HIJACK_ZERO_RELEASE;
+            } else if (hijack_zero_frames >
+                       HIJACK_ZERO_MAX_FRAMES + HIJACK_ZERO_RELEASE_GRACE) {
+                /* The ring has been full for seconds; the injection path is
+                 * dead, so retrying forever only burns frames. */
+                hijack_zero_phase = HIJACK_ZERO_IDLE;
+            }
+            /* shadow_midi_inject_push returns 0 on SUCCESS and -1 when the ring
+             * is full. Compare explicitly — a plain truthiness test reads
+             * success as failure. That inversion cost a device session: the
+             * HOLD packet was enqueued on all 3000 frames of the budget while
+             * the phase never advanced, so Move received a stream of
+             * track-button holds and not one encoder detent. */
+            if (hijack_zero_phase == HIJACK_ZERO_HOLD) {
+                uint8_t hold[4] = { 0x0B, 0xB0, hijack_zero_track_cc, 127 };
+                if (shadow_midi_inject_push(shadow_midi_inject_shm, hold) == 0) {
+                    hijack_zero_phase = HIJACK_ZERO_PUMP;
+                }
+            } else if (hijack_zero_phase == HIJACK_ZERO_PUMP) {
+                for (int n = 0; n < HIJACK_ZERO_PER_FRAME && hijack_zero_detents_left > 0; n++) {
+                    uint8_t turn[4] = { 0x0B, 0xB0, CC_MASTER_KNOB, 65 };  /* -63 */
+                    if (shadow_midi_inject_push(shadow_midi_inject_shm, turn) != 0) break;
+                    hijack_zero_detents_left--;
+                }
+                if (hijack_zero_detents_left == 0) {
+                    hijack_zero_phase = HIJACK_ZERO_RELEASE;
+                }
+            } else if (hijack_zero_phase == HIJACK_ZERO_RELEASE) {
+                uint8_t rel[4] = { 0x0B, 0xB0, hijack_zero_track_cc, 0 };
+                if (shadow_midi_inject_push(shadow_midi_inject_shm, rel) == 0) {
+                    hijack_zero_phase = HIJACK_ZERO_IDLE;
+                }
+            }
+        }
+    }
+
     /* Timing: reuse statics from pre-transfer (same translation unit) */
     /* spi_post_start is at file scope */
 
@@ -5948,6 +6148,55 @@ static void shim_post_transfer(void *ctx, uint8_t *shadow, const uint8_t *hw, in
                         filter = 1;
                     }
                 }
+            }
+
+            /* HiJack: while the hijacked slot's own track button is held, the
+             * volume knob belongs to Schwung. Move never sees the CC, so its
+             * track fader stays where the user parked it (typically at zero,
+             * silencing Move's engine) while the knob rides the Schwung slot.
+             * Deliberately last, after every other filter decision, so nothing
+             * downstream can clear it.
+             *
+             * No save_state() here — this runs on the SPI path where file I/O
+             * is banned; the periodic slot autosave persists the value. */
+            if (cable == 0x00 && cin == 0x0B && type == 0xB0 &&
+                d1 == CC_MASTER_KNOB &&
+                hijack_slot_is_on(shadow_held_track)) {
+                const int hs = shadow_held_track;
+                int knob_delta = 0;
+                if (d2 >= 1 && d2 <= 63)        knob_delta = (int)d2;
+                else if (d2 >= 65 && d2 <= 127) knob_delta = (int)d2 - 128;
+                if (knob_delta != 0) {
+                    float v = shadow_chain_slots[hs].volume + (float)knob_delta * 0.02f;
+                    if (v < 0.0f) v = 0.0f;
+                    if (v > 4.0f) v = 4.0f;
+                    shadow_chain_slots[hs].volume = v;
+                }
+                hijack_gesture_slot = hs;
+                /* Own the OLED for the duration of the gesture so the slot's
+                 * level is visible, and forward the CC so shadow_ui can draw
+                 * the overlay. Released in shadow_swap_display() the moment the
+                 * track button is no longer held — a failsafe by construction
+                 * rather than a matched release handler that could be missed. */
+                if (!hijack_display_asserted) {
+                    /* Remember what the display was doing so we hand it back
+                     * exactly as we found it. The flag must be set even when
+                     * the shadow UI is ALREADY on screen: it is what suppresses
+                     * the volume-touch hide below, and gating it on
+                     * !shadow_display_mode meant the hide still ran whenever
+                     * the UI happened to be up — showing Move's frozen fader
+                     * instead of the slot level. */
+                    hijack_display_was_on = shadow_display_mode ? 1 : 0;
+                    hijack_display_asserted = 1;
+                }
+                if (!shadow_display_mode) {
+                    shadow_display_mode = 1;
+                    if (shadow_control) shadow_control->display_mode = 1;
+                }
+                if (shadow_ui_midi_shm) {
+                    shadow_ui_midi_publish(0x0B, status, d1, d2);
+                }
+                filter = 1;
             }
 
             if (filter) {

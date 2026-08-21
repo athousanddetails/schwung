@@ -142,6 +142,7 @@ void shadow_dispatch_cable2_channeled_slots(void);
 void shadow_external_dispatch_tick(void);
 void shadow_external_dispatch_record(uint8_t status, uint8_t d1, uint8_t d2);
 int  shadow_external_dispatch_was_recent(uint8_t status, uint8_t d1, uint8_t d2);
+void shadow_midi_path_trace(const char *path, int slot, const uint8_t *msg);
 
 /* Forward CC/pitch bend/aftertouch from external MIDI (cable 2) into MIDI_OUT. */
 void shadow_forward_external_cc_to_out(void);

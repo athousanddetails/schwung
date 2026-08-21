@@ -355,6 +355,18 @@ static int shadow_chain_apply_transpose(int slot, uint8_t *msg)
 /* Dispatch MIDI to all matching slots (supports recv=All broadcasting).
  * When skip_direct is 1, slots with receive=All and forward=THRU are skipped
  * because they receive MIDI via the direct MIDI_IN path instead. */
+/* DEBUG ONLY (branch debug/midi-path-trace): label which dispatcher fed a
+ * slot, so a duplicated note-on can be attributed to a path instead of
+ * guessed at. Gated on shadow_midi_out_log_on. */
+void shadow_midi_path_trace(const char *path, int slot, const uint8_t *msg)
+{
+    if (!host_midi_out_logf) return;
+    uint8_t t = msg[0] & 0xF0;
+    if (t != 0x90 && t != 0x80) return;
+    host_midi_out_logf("mpath %-9s slot=%d %02x %02x %02x", path, slot,
+                       msg[0], msg[1], msg[2]);
+}
+
 void shadow_chain_dispatch_midi_to_slots(const uint8_t *pkt, int log_on, int *midi_log_count, int skip_direct)
 {
     const plugin_api_v2_t *pv2 = *host_plugin_v2;
@@ -371,6 +383,7 @@ void shadow_chain_dispatch_midi_to_slots(const uint8_t *pkt, int log_on, int *mi
      * now updated from a dedicated cable-2 MIDI_IN scan in the shim
      * (shim_pre_transfer) so it reports the incoming external channel. */
 
+    (void) 0;
     for (int i = 0; i < SHADOW_CHAIN_INSTANCES; i++) {
         /* Skip direct-dispatch slots when processing MIDI_OUT.
          * These slots get MIDI from MIDI_IN directly to preserve
@@ -415,6 +428,8 @@ void shadow_chain_dispatch_midi_to_slots(const uint8_t *pkt, int log_on, int *mi
         if (pv2 && pv2->on_midi) {
             uint8_t msg[3] = { shadow_chain_remap_channel(i, pkt[1]), pkt[2], pkt[3] };
             if (shadow_chain_apply_transpose(i, msg)) {
+                if (shadow_midi_out_log_enabled())
+                    shadow_midi_path_trace(skip_direct ? "OUT_echo" : "OUT", i, msg);
                 pv2->on_midi(host_chain_slots[i].instance, msg, 3,
                              MOVE_MIDI_SOURCE_EXTERNAL);
             }
@@ -963,6 +978,8 @@ void shadow_dispatch_direct_external_midi(void)
             /* Send with original channel preserved (THRU mode) */
             uint8_t msg[3] = { status, d1, d2 };
             if (shadow_chain_apply_transpose(s, msg)) {
+                if (shadow_midi_out_log_enabled())
+                    shadow_midi_path_trace("IN_direct", s, msg);
                 pv2->on_midi(host_chain_slots[s].instance, msg, 3,
                              MOVE_MIDI_SOURCE_EXTERNAL);
             }
@@ -1073,9 +1090,12 @@ void shadow_dispatch_cable2_channeled_slots(void)
             }
 
             uint8_t msg[3] = { status, d1, d2 };
-            if (shadow_chain_apply_transpose(s, msg))
+            if (shadow_chain_apply_transpose(s, msg)) {
+                if (shadow_midi_out_log_enabled())
+                    shadow_midi_path_trace("IN_chan", s, msg);
                 pv2->on_midi(host_chain_slots[s].instance, msg, 3,
                              MOVE_MIDI_SOURCE_EXTERNAL);
+            }
         }
     }
 }

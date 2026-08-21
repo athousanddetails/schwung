@@ -1213,9 +1213,30 @@ static void shadow_inprocess_process_midi(void) {
     /* Hardware MIDI_OUT region is 80 bytes (20 × 4-byte USB-MIDI packets).
      * Display data starts at offset 80; reading past this and dispatching
      * to the DSP would feed display bytes as spurious MIDI. */
+    /* Dispatch a slot only when its CONTENT CHANGED since the last scan.
+     *
+     * "Refreshed from hardware after every ioctl" is not the same as cleared:
+     * a packet can sit in its slot across scans, and this loop had no dedup of
+     * any kind, so it dispatched that packet again every time it came round.
+     * A re-dispatched note-ON is a voice no note-off will ever reach, plus a
+     * pad LED that never clears -- traced on hardware as a note-on arriving
+     * 40-70 us after a note-off for a DIFFERENT pitch, i.e. a stale slot and a
+     * fresh one found in the same pass.
+     *
+     * MIDI_OUT packets carry no timestamp, so content alone cannot separate a
+     * stale re-read from a genuine repeat -- but position plus content can:
+     * the same bytes in the same slot on two consecutive scans is the buffer
+     * not having moved, not Move sending twice. The only event this can miss
+     * is the identical packet landing in the identical slot on back-to-back
+     * scans, i.e. the same note repeated inside one 2.9 ms frame. */
+    static uint8_t prev_midi_out[HW_MIDI_OUT_SIZE];
+    static int prev_midi_out_valid = 0;
+
     for (int i = 0; i < HW_MIDI_OUT_SIZE; i += 4) {
         const uint8_t *pkt = &out_src[i];
         if (pkt[0] == 0 && pkt[1] == 0 && pkt[2] == 0 && pkt[3] == 0) continue;
+        if (prev_midi_out_valid && memcmp(pkt, &prev_midi_out[i], 4) == 0)
+            continue;                      /* unchanged slot: already dispatched */
 
         uint8_t p0 = pkt[0], p1 = pkt[1], p2 = pkt[2], p3 = pkt[3];
 
@@ -1343,6 +1364,12 @@ static void shadow_inprocess_process_midi(void) {
 
         }
     }
+
+    /* Snapshot the region we just walked, including slots skipped for other
+     * reasons -- the next scan compares against exactly what was on the wire
+     * this time. */
+    memcpy(prev_midi_out, out_src, HW_MIDI_OUT_SIZE);
+    prev_midi_out_valid = 1;
 
 }
 

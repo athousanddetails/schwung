@@ -17,13 +17,31 @@ static void shadow_chain_transpose_reset(void);
  * ============================================================================ */
 
 #define DISPATCHED_EXT_RING_SIZE 32
-#define DISPATCHED_EXT_MAX_AGE_TICKS 8
+/* One second, not the 8 ticks (~23 ms) this started at.
+ *
+ * The window has to outlive the ECHO, and when Move echoes a cable-2 event
+ * back through MIDI_OUT is Move's business. Measured on hardware: a note-on's
+ * echo surfaced in the same MIDI_OUT scan as that note's LATER note-off, i.e.
+ * a whole press later. Past the old window the echo no longer looked like an
+ * echo, so it was dispatched as a fresh note-on -- a voice no note-off would
+ * ever reach, and the pad LED it lit never cleared.
+ *
+ * Lengthening the window is only safe because matching is now refcounted
+ * (see below): each dispatch absorbs exactly ONE echo, so a long window
+ * cannot swallow a genuine repeat of the same pitch. The age-out survives
+ * purely so an echo that never arrives cannot wedge an entry forever. */
+#define DISPATCHED_EXT_MAX_AGE_TICKS 344
 
 typedef struct {
     uint8_t status;
     uint8_t d1;
     uint8_t d2;
     uint8_t valid;
+    /* Echoes outstanding for this event. MIDI_OUT packets carry no timestamp,
+     * so content alone cannot tell a stale re-read from a genuine repeat --
+     * counting what we are still owed can. Mirrors the refcounted echo
+     * matching the chain module already uses for pre_injected_notes. */
+    uint8_t pending;
     uint32_t tick;
 } dispatched_ext_entry_t;
 
@@ -57,23 +75,44 @@ void shadow_external_dispatch_tick(void)
 void shadow_external_dispatch_record(uint8_t status, uint8_t d1, uint8_t d2)
 {
     canonicalize_for_ring(&status, &d1, &d2);
+
+    /* Same event dispatched again before its echo landed: we are owed two. */
+    for (int i = 0; i < DISPATCHED_EXT_RING_SIZE; i++) {
+        dispatched_ext_entry_t *e = &g_dispatched_ext_ring[i];
+        if (!e->valid || !e->pending) continue;
+        if ((g_dispatched_ext_tick - e->tick) > DISPATCHED_EXT_MAX_AGE_TICKS) continue;
+        if (e->status == status && e->d1 == d1 && e->d2 == d2) {
+            if (e->pending < 255) e->pending++;
+            e->tick = g_dispatched_ext_tick;
+            return;
+        }
+    }
+
     dispatched_ext_entry_t *e = &g_dispatched_ext_ring[g_dispatched_ext_head];
     e->status = status;
     e->d1 = d1;
     e->d2 = d2;
     e->tick = g_dispatched_ext_tick;
+    e->pending = 1;
     e->valid = 1;
     g_dispatched_ext_head = (g_dispatched_ext_head + 1) % DISPATCHED_EXT_RING_SIZE;
 }
 
+/* CONSUMES one outstanding echo on a match, so a stale MIDI_OUT packet that
+ * is re-read in a later scan is not mistaken for a second physical event --
+ * and, equally, a genuine repeat is not swallowed, because it recorded an
+ * echo of its own. */
 int shadow_external_dispatch_was_recent(uint8_t status, uint8_t d1, uint8_t d2)
 {
     canonicalize_for_ring(&status, &d1, &d2);
     for (int i = 0; i < DISPATCHED_EXT_RING_SIZE; i++) {
-        const dispatched_ext_entry_t *e = &g_dispatched_ext_ring[i];
-        if (!e->valid) continue;
+        dispatched_ext_entry_t *e = &g_dispatched_ext_ring[i];
+        if (!e->valid || !e->pending) continue;
         if ((g_dispatched_ext_tick - e->tick) > DISPATCHED_EXT_MAX_AGE_TICKS) continue;
-        if (e->status == status && e->d1 == d1 && e->d2 == d2) return 1;
+        if (e->status == status && e->d1 == d1 && e->d2 == d2) {
+            if (--e->pending == 0) e->valid = 0;
+            return 1;
+        }
     }
     return 0;
 }

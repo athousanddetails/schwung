@@ -126,7 +126,24 @@ static int event_dedup_check_and_record(event_dedup_entry_t *ring, int *head,
     for (int i = 0; i < EVENT_DEDUP_RING_SIZE; i++) {
         if (!ring[i].valid) continue;
         if ((g_dispatched_ext_tick - ring[i].tick) > EVENT_DEDUP_MAX_AGE_TICKS) continue;
-        if (memcmp(ring[i].key, key, 8) == 0) return 1;
+        if (memcmp(ring[i].key, key, 8) == 0) {
+            /* Still in MIDI_IN, so keep the entry alive. The age window has to
+             * outlive the EVENT, and an event's lifetime in MIDI_IN is set by
+             * Move's firmware, not by us -- measured at 621 ms on hardware
+             * against a 16-tick (~46 ms) window. Without this refresh the
+             * entry expired while its event was still sitting in the buffer,
+             * and the next scan dispatched that event a second time: a
+             * re-dispatched note-ON became a voice no note-off would ever
+             * reach, and the pad LED it lit never cleared.
+             *
+             * Refreshing cannot suppress a DIFFERENT event: the key carries
+             * the XMOS per-event timestamp, so a retrigger of the same pitch
+             * has a different key and still dispatches. The age window only
+             * reclaims ring slots, and now it starts when the event actually
+             * leaves MIDI_IN. */
+            ring[i].tick = g_dispatched_ext_tick;
+            return 1;
+        }
     }
     event_dedup_entry_t *e = &ring[*head];
     memcpy(e->key, key, 8);

@@ -1250,6 +1250,21 @@ static void shadow_inprocess_process_midi(void) {
         if (used >= 10)
             shadow_midi_out_logf("OCC  f=%u used=%d/20 led=%d note=%d hi=%d",
                                  dbg_out_frame, used, led, note, hi);
+        /* At near-full, dump WHAT is holding the region: cable:status:data1.
+         * CC 16-31 = step LEDs, 71-78 = knob rings, note 68-99 = pads. That
+         * names the writer, which is what decides whether to reserve harder
+         * or to throttle the repaint that floods it. */
+        if (used >= 18) {
+            char line[512];
+            int o = snprintf(line, sizeof line, "OCCD f=%u", dbg_out_frame);
+            for (int k = 0; k < HW_MIDI_OUT_SIZE && o < (int) sizeof line - 16; k += 4) {
+                const uint8_t *q = &out_src[k];
+                if (!q[0] && !q[1] && !q[2] && !q[3]) continue;
+                o += snprintf(line + o, sizeof line - (size_t) o, " %u:%02x:%02x",
+                              (q[0] >> 4) & 0x0F, q[1], q[2]);
+            }
+            shadow_midi_out_logf("%s", line);
+        }
     }
     for (int i = 0; i < HW_MIDI_OUT_SIZE; i += 4) {
         const uint8_t *pkt = &out_src[i];

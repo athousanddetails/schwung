@@ -553,13 +553,26 @@ void shadow_inject_ui_midi_out(void)
     /* Snapshot buffer first, then reset write_idx.
      * Copy before resetting to avoid a race where the JS process writes
      * new data between our reset and memcpy. */
+    /* Packets a previous call could not fit, carried rather than dropped. */
+    static uint8_t carry[SHADOW_MIDI_OUT_BUFFER_SIZE];
+    static int carry_len = 0;
+
     int snapshot_len = midi_out_shm->write_idx;
     uint8_t local_buf[SHADOW_MIDI_OUT_BUFFER_SIZE];
     int copy_len = snapshot_len < (int)SHADOW_MIDI_OUT_BUFFER_SIZE
                  ? snapshot_len : (int)SHADOW_MIDI_OUT_BUFFER_SIZE;
-    if (copy_len > 0) {
-        memcpy(local_buf, midi_out_shm->buffer, copy_len);
+    int held = carry_len;
+    carry_len = 0;
+    if (held > 0) {
+        if (held > (int) sizeof local_buf) held = (int) sizeof local_buf;
+        memcpy(local_buf, carry, (size_t) held);
+        if (copy_len > (int) sizeof local_buf - held)
+            copy_len = (int) sizeof local_buf - held;
     }
+    if (copy_len > 0) {
+        memcpy(local_buf + held, midi_out_shm->buffer, copy_len);
+    }
+    copy_len += held;
     __sync_synchronize();
     midi_out_shm->write_idx = 0;
     memset(midi_out_shm->buffer, 0, SHADOW_MIDI_OUT_BUFFER_SIZE);
@@ -582,16 +595,34 @@ void shadow_inject_ui_midi_out(void)
             continue;  /* Don't copy directly, will be flushed later */
         }
 
-        /* All other messages: copy directly to mailbox */
-        /* MIDI_OUT region is 80 bytes; display starts at 80. Don't write past. */
-        while (hw_offset < HW_MIDI_OUT_SIZE) {
+        /* All other messages: copy directly to mailbox.
+         *
+         * Stop at the same reserve the LED queue honours, not at the end of
+         * the region. These 80 bytes are SHARED with Move's own output, and
+         * filling them to the brim leaves Move nowhere to put a note-off and
+         * its pad LED-off -- it drops both, hanging a voice in the synth and
+         * leaving the pad lit. See SHADOW_MIDI_OUT_MOVE_RESERVE_BYTES.
+         *
+         * Display data starts at 80, so the old bound also had to hold. */
+        while (hw_offset < SHADOW_LED_QUEUE_SAFE_BYTES) {
             if (midi_out[hw_offset] == 0 && midi_out[hw_offset+1] == 0 &&
                 midi_out[hw_offset+2] == 0 && midi_out[hw_offset+3] == 0) {
                 break;
             }
             hw_offset += 4;
         }
-        if (hw_offset >= HW_MIDI_OUT_SIZE) break;  /* Buffer full */
+        if (hw_offset >= SHADOW_LED_QUEUE_SAFE_BYTES) {
+            /* No room this frame. The remainder used to be dropped here --
+             * silently, because write_idx was already reset and the SHM buffer
+             * cleared, so these packets existed only in local_buf. Carry them
+             * instead: they go out on the next call, ahead of whatever the UI
+             * writes next. */
+            int rest = copy_len - i;
+            if (rest > (int) sizeof carry) rest = (int) sizeof carry;
+            memcpy(carry, &local_buf[i], (size_t) rest);
+            carry_len = rest;
+            return;
+        }
 
         memcpy(&midi_out[hw_offset], &local_buf[i], 4);
         hw_offset += 4;

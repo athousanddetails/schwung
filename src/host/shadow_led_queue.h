@@ -12,7 +12,27 @@
  * ============================================================================ */
 
 #define SHADOW_LED_MAX_UPDATES_PER_TICK 16
-#define SHADOW_LED_QUEUE_SAFE_BYTES 76
+/* How much of the shared MIDI_OUT region Schwung may occupy in normal mode.
+ *
+ * The region is 80 bytes -- 20 USB-MIDI packets -- and it is SHARED with
+ * Move's own output: musical note-ons/offs AND the pad LED updates that go
+ * with them. At 76 this left Move a single packet of headroom, which is less
+ * than one pad release costs it: releasing a pad emits the note-off and the
+ * pad's LED-off, two packets, in the same frame.
+ *
+ * Measured on hardware while turning an encoder (which floods knob-ring LED
+ * repaints through this queue): a pad note-off present and unfiltered at the
+ * input boundary never appeared in Move's output at all, and the pad stayed
+ * lit -- the note-off and its LED-off dropped together, exactly the pair that
+ * does not fit in one slot. The synth hung a voice nothing would release.
+ *
+ * Reserving 6 packets covers a chord release rather than a single pad. LED
+ * updates are queued last-writer-wins and re-flushed on the next tick, so
+ * what does not fit is deferred by a frame or two, never lost -- cheap
+ * against dropping Move's musical traffic. */
+#define SHADOW_MIDI_OUT_MOVE_RESERVE_BYTES 24
+#define SHADOW_LED_QUEUE_SAFE_BYTES \
+    (HW_MIDI_OUT_SIZE - SHADOW_MIDI_OUT_MOVE_RESERVE_BYTES)
 /* In overtake mode we clear Move's cable-0 LEDs, freeing most of the buffer */
 #define SHADOW_LED_OVERTAKE_BUDGET 48
 /* Budget for restoring Move's LED state after overtake exit.

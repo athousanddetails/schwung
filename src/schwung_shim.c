@@ -1234,6 +1234,23 @@ static void shadow_inprocess_process_midi(void) {
 
     static uint32_t dbg_out_frame = 0;
     dbg_out_frame++;
+    /* DEBUG: how full the shared 20-slot region is on every scan, and what
+     * kind of traffic holds it. If Move is dropping its own note-offs for want
+     * of a slot, this is the number that says so. */
+    if (shadow_midi_out_log_enabled()) {
+        int used = 0, led = 0, note = 0, hi = -1;
+        for (int k = 0; k < HW_MIDI_OUT_SIZE; k += 4) {
+            const uint8_t *q = &out_src[k];
+            if (!q[0] && !q[1] && !q[2] && !q[3]) continue;
+            used++; hi = k / 4;
+            uint8_t cb = (q[0] >> 4) & 0x0F, t = q[1] & 0xF0;
+            if (cb == 0) led++;
+            else if (t == 0x90 || t == 0x80) note++;
+        }
+        if (used >= 10)
+            shadow_midi_out_logf("OCC  f=%u used=%d/20 led=%d note=%d hi=%d",
+                                 dbg_out_frame, used, led, note, hi);
+    }
     for (int i = 0; i < HW_MIDI_OUT_SIZE; i += 4) {
         const uint8_t *pkt = &out_src[i];
         if (pkt[0] == 0 && pkt[1] == 0 && pkt[2] == 0 && pkt[3] == 0) continue;

@@ -30,7 +30,7 @@
  * updates are queued last-writer-wins and re-flushed on the next tick, so
  * what does not fit is deferred by a frame or two, never lost -- cheap
  * against dropping Move's musical traffic. */
-#define SHADOW_MIDI_OUT_MOVE_RESERVE_BYTES 24
+#define SHADOW_MIDI_OUT_MOVE_RESERVE_BYTES 48
 #define SHADOW_LED_QUEUE_SAFE_BYTES \
     (HW_MIDI_OUT_SIZE - SHADOW_MIDI_OUT_MOVE_RESERVE_BYTES)
 /* In overtake mode we clear Move's cable-0 LEDs, freeing most of the buffer */

@@ -1232,9 +1232,21 @@ static void shadow_inprocess_process_midi(void) {
     static uint8_t prev_midi_out[HW_MIDI_OUT_SIZE];
     static int prev_midi_out_valid = 0;
 
+    static uint32_t dbg_out_frame = 0;
+    dbg_out_frame++;
     for (int i = 0; i < HW_MIDI_OUT_SIZE; i += 4) {
         const uint8_t *pkt = &out_src[i];
         if (pkt[0] == 0 && pkt[1] == 0 && pkt[2] == 0 && pkt[3] == 0) continue;
+        {
+            /* DEBUG: every cable-2 note packet present in MIDI_OUT this scan,
+             * new or lingering, so a slot that persists shows as repeats */
+            uint8_t t = pkt[1] & 0xF0;
+            int same = prev_midi_out_valid && memcmp(pkt, &prev_midi_out[i], 4) == 0;
+            if ((t == 0x90 || t == 0x80) && ((pkt[0] >> 4) & 0x0F) == 2 && shadow_midi_out_log_enabled())
+                shadow_midi_out_logf("OUT  f=%u s=%d %02x %02x %02x %s",
+                                     dbg_out_frame, i / 4, pkt[1], pkt[2], pkt[3],
+                                     same ? "same" : "NEW");
+        }
         if (prev_midi_out_valid && memcmp(pkt, &prev_midi_out[i], 4) == 0)
             continue;                      /* unchanged slot: already dispatched */
 
@@ -6443,6 +6455,25 @@ static void shim_post_transfer(void *ctx, uint8_t *shadow, const uint8_t *hw, in
     uint8_t *sh_midi = shadow + MIDI_IN_OFFSET;
     int overtake_mode = shadow_control ? shadow_control->overtake_mode : 0;
 
+    /* DEBUG (branch debug/midi-boundary-trace): every cable-0 pad note the
+     * hardware delivered this frame, BEFORE any filtering -- ground truth for
+     * whether a lost note-off was ever received by the host at all. */
+    static uint32_t dbg_frame = 0;
+    dbg_frame++;
+    if (shadow_midi_out_log_enabled()) {
+        for (int j = 0; j < MIDI_BUFFER_SIZE; j += 8) {
+            uint8_t cin = hw_midi[j] & 0x0F, cable = (hw_midi[j] >> 4) & 0x0F;
+            uint8_t st = hw_midi[j + 1], t = st & 0xF0, d1 = hw_midi[j + 2];
+            if (cable != 0 || (cin != 0x09 && cin != 0x08)) continue;
+            if (t != 0x90 && t != 0x80) continue;
+            if (d1 < 68 || d1 > 99) continue;
+            shadow_midi_out_logf("HWIN f=%u s=%d %02x %02x %02x ts=%02x%02x%02x%02x mode=%d disp=%d",
+                                 dbg_frame, j / 8, st, d1, hw_midi[j + 3],
+                                 hw_midi[j + 4], hw_midi[j + 5], hw_midi[j + 6], hw_midi[j + 7],
+                                 overtake_mode, (int) shadow_display_mode);
+        }
+    }
+
     /* Detect overtake mode exit and inject button releases into Move's MIDI_IN.
      * During overtake, all cable-0 MIDI is filtered from reaching Move firmware,
      * so if the user released Shift or the volume knob touch while in overtake,
@@ -6708,6 +6739,10 @@ static void shim_post_transfer(void *ctx, uint8_t *shadow, const uint8_t *hw, in
                 }
             }
 
+            if (shadow_midi_out_log_enabled() && cable == 0 &&
+                (type == 0x90 || type == 0x80) && d1 >= 68 && d1 <= 99)
+                shadow_midi_out_logf("SHIN f=%u s=%d %02x %02x %02x filt=%d",
+                                     dbg_frame, j / 8, status, d1, d2, filter);
             if (filter) {
                 /* Zero the packet dword in the shadow buffer (slot becomes
                  * empty; later slots stay valid — readers skip, not break) */

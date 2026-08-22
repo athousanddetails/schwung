@@ -1566,19 +1566,26 @@
             return;
         }
 
-        // The slot-level Interface toggle and pop-out follow the SYNTH panel,
-        // which is the one that takes over the whole slot view. A custom FX
-        // panel lives inside its own section and carries its own pop-out.
+        // Two separate questions. The Interface toggle is slot-wide — it flips
+        // every panel in the slot, which is what renderComponentSection already
+        // assumes by reading useDefaultUI — so it has to appear whenever ANY
+        // component has a panel. Gating it on the synth left an FX-only slot
+        // with no way back to the generated controls.
         var synthCustomUrl = s.customUI.synth || "";
-        var hasCustomUI = !!(synthCustomUrl && hasAnyModule);
-        if (hasCustomUI && slotHeaderControlsEl) {
+        var hasAnyCustomUI = hasAnyModule && COMPONENT_KEYS.some(function (k) {
+            return s.customUI[k];
+        });
+        if (hasAnyCustomUI && slotHeaderControlsEl) {
             slotHeaderControlsEl.appendChild(renderUiModeToggle(s));
-            slotHeaderControlsEl.appendChild(
-                makePopOutButton(customUIUrlFor(synthCustomUrl, "synth"), activeSlot));
+            // Pop-out stays synth-only; an FX section carries its own.
+            if (synthCustomUrl) {
+                slotHeaderControlsEl.appendChild(
+                    makePopOutButton(customUIUrlFor(synthCustomUrl, "synth"), activeSlot));
+            }
         }
 
-        // Render the custom web UI unless the user opted out for this slot.
-        if (hasCustomUI && !s.useDefaultUI) {
+        // Only a synth panel takes over the slot view.
+        if (synthCustomUrl && !s.useDefaultUI) {
             renderCustomUI(s);
             return;
         }
@@ -2200,13 +2207,13 @@
         }
     });
 
-    function handleIframeGetParam(msg) {
+    function handleIframeGetParam(msg, comp) {
         if (!msg.key || !msg.id) return;
         var slot = activeSlot;
 
         // Tool view: params come from the overtake tool's cache (overtake_dsp:*).
         if (slot === "tool") {
-            postToIframe({ type: "paramResult", id: msg.id, value: tool.params[msg.key] || "" });
+            postToIframe({ type: "paramResult", id: msg.id, value: tool.params[msg.key] || "" }, comp);
             return;
         }
         if (typeof slot !== "number") return;
@@ -2217,10 +2224,14 @@
         var compState = slots[slot].components[parts.comp];
         var value = compState ? (compState.params[msg.key] || "") : "";
 
-        postToIframe({ type: "paramResult", id: msg.id, value: value });
+        // Targeted: request ids come from a per-page counter in
+        // schwung-remote-api.js ("req_<n>_<ms>"), so two panels can mint the
+        // same id in the same millisecond and a broadcast reply would resolve
+        // in the wrong one with another component's value.
+        postToIframe({ type: "paramResult", id: msg.id, value: value }, comp);
     }
 
-    function handleIframeSetParam(msg) {
+    function handleIframeSetParam(msg, comp) {   // comp unused: no reply is sent
         if (!msg.key) return;
         var slot = activeSlot;
 

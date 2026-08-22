@@ -6657,7 +6657,19 @@ static void shim_post_transfer(void *ctx, uint8_t *shadow, const uint8_t *hw, in
             (corun_target(shadow_control) == CORUN_TARGET_MOVE_NATIVE) &&
             !(corun_keep_mask_eff(shadow_control) & CORUN_GRP_KNOBS);
 
-        /* Filter MIDI_IN: zero out jog/back/knobs */
+        /* Filter MIDI_IN: drop jog/back/knobs -- COMPACTING, not zeroing.
+         * A filtered event used to become an empty slot in the middle of the
+         * run Move's firmware reads, and firmware stops at the first empty
+         * slot -- everything behind the hole was silently invisible to it.
+         * Filtering a knob CC (exactly what turning an encoder produces) in
+         * the same frame as a pad release therefore ate the release: Move
+         * emitted neither the note-off nor the pad's LED-off, the synth hung
+         * a voice and the pad stayed lit. Traced on hardware: the lost
+         * release always sat at slot >= 1; the same pad's note-on, arriving
+         * alone in slot 0, always got through. Surviving events are written
+         * contiguously and the tail zeroed, so Move sees a gapless run
+         * whatever was dropped. */
+        int w = 0;
         for (int j = 0; j < MIDI_BUFFER_SIZE; j += 8) {
             uint8_t cin = hw_midi[j] & 0x0F;
             uint8_t cable = (hw_midi[j] >> 4) & 0x0F;
@@ -6773,28 +6785,26 @@ static void shim_post_transfer(void *ctx, uint8_t *shadow, const uint8_t *hw, in
 
             if (shadow_midi_out_log_enabled() && cable == 0 &&
                 (type == 0x90 || type == 0x80) && d1 >= 68 && d1 <= 99)
-                shadow_midi_out_logf("SHIN f=%u s=%d %02x %02x %02x filt=%d",
-                                     dbg_frame, j / 8, status, d1, d2, filter);
-            if (filter) {
-                /* Zero the packet dword in the shadow buffer (slot becomes
-                 * empty; later slots stay valid — readers skip, not break) */
-                sh_midi[j] = 0;
-                sh_midi[j + 1] = 0;
-                sh_midi[j + 2] = 0;
-                sh_midi[j + 3] = 0;
-            } else {
-                /* Copy packet as-is */
-                sh_midi[j] = hw_midi[j];
-                sh_midi[j + 1] = hw_midi[j + 1];
-                sh_midi[j + 2] = hw_midi[j + 2];
-                sh_midi[j + 3] = hw_midi[j + 3];
-            }
-            /* Carry the 4-byte timestamp dword either way */
-            sh_midi[j + 4] = hw_midi[j + 4];
-            sh_midi[j + 5] = hw_midi[j + 5];
-            sh_midi[j + 6] = hw_midi[j + 6];
-            sh_midi[j + 7] = hw_midi[j + 7];
+                shadow_midi_out_logf("SHIN f=%u s=%d->%d %02x %02x %02x filt=%d",
+                                     dbg_frame, j / 8, w / 8, status, d1, d2, filter);
+            if (hw_midi[j] == 0)
+                continue;              /* empty hardware slot: nothing to keep */
+            if (filter)
+                continue;              /* dropped: leave NO hole behind */
+            /* Copy packet + its 4-byte timestamp to the next contiguous slot */
+            sh_midi[w]     = hw_midi[j];
+            sh_midi[w + 1] = hw_midi[j + 1];
+            sh_midi[w + 2] = hw_midi[j + 2];
+            sh_midi[w + 3] = hw_midi[j + 3];
+            sh_midi[w + 4] = hw_midi[j + 4];
+            sh_midi[w + 5] = hw_midi[j + 5];
+            sh_midi[w + 6] = hw_midi[j + 6];
+            sh_midi[w + 7] = hw_midi[j + 7];
+            w += 8;
         }
+        /* zero the tail: the compacted run ends where the events end */
+        if (w < MIDI_BUFFER_SIZE)
+            memset(sh_midi + w, 0, (size_t)(MIDI_BUFFER_SIZE - w));
 
         /* Move-native knob coalesce: emit ONE consolidated CC per knob whose
          * detents we suppressed above, into an empty sh_midi slot. Clamp deltas

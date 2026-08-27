@@ -1321,7 +1321,8 @@
       "github_repo": "athousanddetails/schwung-4keq",
       "default_branch": "main",
       "asset_name": "4k-eq-module.tar.gz",
-      "min_host_version": "0.12.1"
+      "min_host_version": "0.12.1",
+      "requires": "Schwung 0.12.1 or newer \u2014 the device UI is Schwung's stock knob pages, which do not exist before 0.12; on an older host it loads and passes audio with no knobs"
     }
   ]
 }

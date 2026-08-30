@@ -1406,10 +1406,23 @@ func (app *App) handleModuleUninstall(w http.ResponseWriter, r *http.Request) {
 		app.moduleRedirect(w, r, id, "Uninstall+failed:+"+err.Error(), flashError)
 		return
 	}
-	// Sideloaded modules without a catalog entry have no detail page once
-	// removed, so going back to the Referer 404s. Send the user to the
-	// modules list instead — same destination as install-all/update-all.
-	http.Redirect(w, r, "/modules?flash=Module+uninstalled", http.StatusSeeOther)
+	http.Redirect(w, r, uninstallRedirectDest(r), http.StatusSeeOther)
+}
+
+// Where an uninstall lands. A return_to from the list is honoured so
+// uninstalling from there keeps your filter, but the fallback is the LIST and
+// deliberately NOT moduleRedirect's detail page: a sideloaded module without a
+// catalog entry has no detail page once removed, so landing there 404s.
+func uninstallRedirectDest(r *http.Request) string {
+	dest := safeReturnTo(r.FormValue("return_to"))
+	if dest == "" {
+		dest = "/modules"
+	}
+	sep := "?"
+	if strings.Contains(dest, "?") {
+		sep = "&"
+	}
+	return dest + sep + "flash=Module+uninstalled&flash_type=" + flashSuccess
 }
 
 func (app *App) handleModuleUpdate(w http.ResponseWriter, r *http.Request) {
@@ -1442,18 +1455,20 @@ func (app *App) handleModuleUpdateAll(w http.ResponseWriter, r *http.Request) {
 			updated++
 		}
 	}
-	msg := fmt.Sprintf("Updated+%d+modules", updated)
+	msg := "All+Modules+Upgraded"
+	kind := flashSuccess
 	if failed > 0 {
-		msg += fmt.Sprintf(",+%d+failed", failed)
+		msg = fmt.Sprintf("Updated+%d+modules,+%d+failed", updated, failed)
+		kind = flashError
 	}
-	http.Redirect(w, r, "/modules?flash="+msg, http.StatusSeeOther)
+	http.Redirect(w, r, "/modules?flash="+msg+"&flash_type="+kind, http.StatusSeeOther)
 }
 
 func (app *App) handleModuleInstallAll(w http.ResponseWriter, r *http.Request) {
 	cat, err := app.catalogSvc.Fetch()
 	if err != nil {
 		app.logger.Error("install-all: fetch catalog failed", "err", err)
-		http.Redirect(w, r, "/modules?flash=Install+all+failed:+"+err.Error(), http.StatusSeeOther)
+		http.Redirect(w, r, "/modules?flash=Install+all+failed:+"+err.Error()+"&flash_type="+flashError, http.StatusSeeOther)
 		return
 	}
 	installed := discoverInstalledModules(app.basePath)
@@ -1471,14 +1486,17 @@ func (app *App) handleModuleInstallAll(w http.ResponseWriter, r *http.Request) {
 			ok++
 		}
 	}
-	msg := fmt.Sprintf("Installed+%d+modules", ok)
+	// The clean wording only when nothing failed — "All Modules Installed"
+	// over two failures is the same lie the uncoloured flash used to tell.
+	msg := "All+Modules+Installed"
+	kind := flashSuccess
 	if failed > 0 {
-		msg += fmt.Sprintf(",+%d+failed", failed)
+		msg = fmt.Sprintf("Installed+%d+modules,+%d+failed", ok, failed)
+		kind = flashError
+	} else if skipped > 0 {
+		msg = fmt.Sprintf("All+Modules+Installed+(%d+already+installed)", skipped)
 	}
-	if skipped > 0 {
-		msg += fmt.Sprintf(",+%d+already+installed", skipped)
-	}
-	http.Redirect(w, r, "/modules?flash="+msg, http.StatusSeeOther)
+	http.Redirect(w, r, "/modules?flash="+msg+"&flash_type="+kind, http.StatusSeeOther)
 }
 
 // firstModuleDir returns the first directory entry among a tar's top-level

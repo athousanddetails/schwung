@@ -176,3 +176,39 @@ func TestRenderFlashTypeIsAllowlisted(t *testing.T) {
 		}
 	}
 }
+
+// Uninstall keeps you where you were, but its fallback is the LIST, never the
+// module's detail page: a sideloaded module has no detail page once removed,
+// so moduleRedirect's fallback would 404.
+func TestUninstallRedirectDest(t *testing.T) {
+	// No return_to: the fallback.
+	r := httptest.NewRequest(http.MethodPost, "/modules/gone/uninstall", nil)
+	got := uninstallRedirectDest(r)
+	if strings.Contains(got, "/modules/gone") {
+		t.Fatalf("dest = %q -- a removed module's detail page 404s", got)
+	}
+	if !strings.HasPrefix(got, "/modules?") {
+		t.Fatalf("dest = %q, want the modules list", got)
+	}
+	if !strings.Contains(got, "flash_type="+flashSuccess) {
+		t.Errorf("dest = %q, want a success-coloured toast", got)
+	}
+
+	// With a return_to, the filtered list is preserved.
+	form := url.Values{"return_to": {"/modules?sort=az"}}
+	r2 := httptest.NewRequest(http.MethodPost, "/modules/gone/uninstall",
+		strings.NewReader(form.Encode()))
+	r2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if got := uninstallRedirectDest(r2); !strings.HasPrefix(got, "/modules?sort=az&flash=") {
+		t.Errorf("dest = %q, want the return_to preserved with the flash appended", got)
+	}
+
+	// An off-site return_to is refused here too.
+	form3 := url.Values{"return_to": {"//evil.example/"}}
+	r3 := httptest.NewRequest(http.MethodPost, "/modules/gone/uninstall",
+		strings.NewReader(form3.Encode()))
+	r3.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if got := uninstallRedirectDest(r3); strings.Contains(got, "evil.example") {
+		t.Errorf("dest = %q -- followed an off-site return_to", got)
+	}
+}

@@ -92,6 +92,7 @@
                     <button type="submit" class="btn btn-secondary btn-small">Update</button>
                 </form>
                 {{end}}
+                {{template "uninstall-button" (dict "ID" .ID "Name" .Name "CSRFToken" $.CSRFToken)}}
             </div>
         </article>
         {{end}}{{end}}
@@ -153,6 +154,7 @@
                             <button type="submit" class="btn btn-secondary btn-small">Update</button>
                         </form>
                         {{end}}
+                        {{template "uninstall-button" (dict "ID" .ID "Name" .Name "CSRFToken" $.CSRFToken)}}
                     </td>
                 </tr>
                 {{end}}{{end}}
@@ -264,7 +266,11 @@
         updateBtns.forEach(function(b) { b.disabled = disabled; });
     }
 
-    function runBulk(label, suffix, emptyMsg) {
+    /* doneMsg is what the toast says when EVERY item succeeded. A partial run
+     * must not claim it, so the failure case reports the counts instead and
+     * arrives red -- "All Modules Installed" over two failures would be the
+     * same lie the flash colouring used to tell. */
+    function runBulk(label, suffix, emptyMsg, doneMsg) {
         setBtnsDisabled(true);
         var targets = collectTargets(suffix);
         if (targets.length === 0) {
@@ -281,7 +287,16 @@
                 statusEl.textContent = label + ' done — ' + ok + ' ok' + (failed ? ', ' + failed + ' failed' : '');
                 detailEl.textContent = '';
                 barFill.style.width = '100%';
-                setTimeout(function() { window.location.reload(); }, 1200);
+                /* Reload THROUGH a flash so the result is still on screen
+                 * afterwards. A bare reload dropped it: the inline progress
+                 * text is wiped by the very reload that shows the new state,
+                 * so a bulk run finished with nothing saying it had. */
+                var msg = failed ? (ok + ' ok, ' + failed + ' failed') : doneMsg;
+                var kind = failed ? 'error' : 'success';
+                setTimeout(function() {
+                    window.location.href = '/modules?flash=' + encodeURIComponent(msg) +
+                                           '&flash_type=' + kind;
+                }, 1200);
                 return;
             }
             var t = targets[idx++];
@@ -296,12 +311,12 @@
 
     installBtn.addEventListener('click', function() {
         if (!confirm('Install every uninstalled module from the catalog?')) return;
-        runBulk('Installing', 'install', 'All modules already installed');
+        runBulk('Installing', 'install', 'All modules already installed', 'All Modules Installed');
     });
     updateBtns.forEach(function(btn) {
         btn.addEventListener('click', function() {
             if (!confirm('Update every module that has an update available?')) return;
-            runBulk('Updating', 'update', 'All modules are up to date');
+            runBulk('Updating', 'update', 'All modules are up to date', 'All Modules Upgraded');
         });
     });
 })();

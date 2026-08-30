@@ -395,6 +395,22 @@ footer {
     font-size: 0.8125rem;
 }
 
+/* Square icon-only button, sized to sit beside a .btn-small without the
+ * horizontal padding a label needs. It keeps 36px — the same as .btn-small
+ * rather than the 44px .btn default — so a row action stays compact, and the
+ * SVG inside takes `currentColor`, which is what lets the trash follow
+ * --color-danger and its hover state instead of being a fixed-colour glyph. */
+.btn-icon {
+    min-height: 36px;
+    min-width: 36px;
+    padding: 0;
+    flex-shrink: 0;
+}
+
+.btn-icon svg {
+    display: block;
+}
+
 /* ---- Forms ---- */
 .form-group {
     margin-bottom: var(--space-lg);

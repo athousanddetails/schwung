@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httputil"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -1306,10 +1307,49 @@ func (app *App) findCatalogModule(id string) *CatalogModule {
 
 // moduleRedirect sends the user back to where they came from (Referer),
 // falling back to the module detail page.
+// safeReturnTo accepts a caller-supplied destination only when it is a path on
+// this server: a leading "/" but not "//" (which a browser reads as a
+// protocol-relative URL to another host). Anything else is refused, so a
+// return_to cannot be turned into an open redirect.
+func safeReturnTo(v string) string {
+	if len(v) < 1 || v[0] != '/' {
+		return ""
+	}
+	if strings.HasPrefix(v, "//") || strings.Contains(v, "\\") {
+		return ""
+	}
+	return v
+}
+
 func (app *App) moduleRedirect(w http.ResponseWriter, r *http.Request, id, flash string) {
-	dest := r.Header.Get("Referer")
+	// Where the form said it came from. This is the only reliable signal we
+	// have: every response sets `Referrer-Policy: no-referrer`, so the Referer
+	// below is ALWAYS empty and the fallback fired every time -- which is why
+	// installing from the module list dumped you on the module's detail page
+	// instead of leaving you where you were.
+	dest := safeReturnTo(r.FormValue("return_to"))
+	if dest == "" {
+		// A Referer is an absolute URL when it is sent at all, so reduce it to
+		// its path before the same-origin check -- otherwise a working Referer
+		// (a deployment that relaxed the policy) would be refused and land on
+		// the detail page, which is the very thing being fixed.
+		ref := r.Header.Get("Referer")
+		if u, err := url.Parse(ref); err == nil && u.Path != "" {
+			ref = u.Path
+			if u.RawQuery != "" {
+				ref += "?" + u.RawQuery
+			}
+		}
+		dest = safeReturnTo(ref)
+	}
 	if dest == "" {
 		dest = "/modules/" + id
+	}
+	// Re-running an install must not stack flashes on the URL forever.
+	if i := strings.Index(dest, "?flash="); i >= 0 {
+		dest = dest[:i]
+	} else if i := strings.Index(dest, "&flash="); i >= 0 {
+		dest = dest[:i]
 	}
 	// Append flash as query param
 	sep := "?"

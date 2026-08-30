@@ -395,6 +395,19 @@ footer {
     font-size: 0.8125rem;
 }
 
+/* The Actions column holds one or two small buttons rather than text, so it
+ * centres — a left-aligned icon under a left-aligned "ACTIONS" heading reads
+ * as though it belongs to the Author column beside it. Applied to the header
+ * too, so the label sits over what it labels. The forms inside are
+ * inline-flex, i.e. inline-level, so text-align centres them. */
+.col-actions {
+    text-align: center;
+}
+
+.col-actions .inline-form {
+    justify-content: center;
+}
+
 /* Square icon-only button, sized to sit beside a .btn-small without the
  * horizontal padding a label needs. It keeps 36px — the same as .btn-small
  * rather than the 44px .btn default — so a row action stays compact, and the

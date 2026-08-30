@@ -137,7 +137,7 @@
                     <th scope="col">Name</th>
                     <th scope="col">Category</th>
                     <th scope="col">Author</th>
-                    <th scope="col">Actions</th>
+                    <th scope="col" class="col-actions">Actions</th>
                 </tr>
             </thead>
             <tbody>
@@ -146,7 +146,7 @@
                     <td><span class="module-list-name">{{.Name}}</span> <a class="module-version-inline" href="{{releaseURL .GithubRepo (index $.Installed .ID).Version}}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">{{versionStr (index $.Installed .ID).Version}}</a></td>
                     <td><span class="badge badge-{{.ComponentType}} badge-inline">{{categoryLabel .ComponentType}}</span></td>
                     <td class="module-list-author" title="{{.Author}}">{{.Author}}</td>
-                    <td>
+                    <td class="col-actions">
                         {{if hasUpdate .ID $.Installed $.ReleaseMeta}}
                         <form method="POST" action="/modules/{{.ID}}/update" class="inline-form" onclick="event.stopPropagation()" data-confirm="Update {{.Name}}?" data-confirm-title="Update Module" data-confirm-label="Update">
                             <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
@@ -174,7 +174,7 @@
                     <th scope="col">Name</th>
                     <th scope="col">Category</th>
                     <th scope="col">Author</th>
-                    <th scope="col">Actions</th>
+                    <th scope="col" class="col-actions">Actions</th>
                 </tr>
             </thead>
             <tbody>
@@ -183,7 +183,7 @@
                     <td><span class="module-list-name">{{.Name}}</span>{{if (releaseMeta .ID $.ReleaseMeta).Version}} <a class="module-version-inline" href="{{releaseURL .GithubRepo (releaseMeta .ID $.ReleaseMeta).Version}}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">{{versionStr (releaseMeta .ID $.ReleaseMeta).Version}}</a>{{end}}</td>
                     <td><span class="badge badge-{{.ComponentType}} badge-inline">{{categoryLabel .ComponentType}}</span></td>
                     <td class="module-list-author" title="{{.Author}}">{{.Author}}</td>
-                    <td>
+                    <td class="col-actions">
                         <form method="POST" action="/modules/{{.ID}}/install" class="inline-form" onclick="event.stopPropagation()" data-confirm="Install {{.Name}}?" data-confirm-title="Install Module" data-confirm-label="Install">
                             <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
                     <input type="hidden" name="return_to" value="/modules" class="js-return-to">

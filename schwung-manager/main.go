@@ -821,6 +821,19 @@ func (app *App) render(w http.ResponseWriter, r *http.Request, name string, data
 	if app.shm != nil {
 		data["MirrorEnabled"] = app.shm.DisplayMirror()
 	}
+	// The toast's kind, from the same redirect that carried its text. Injected
+	// HERE rather than in each handler because every page renders the flash
+	// through the shared base template, and a handler that forgot it would show
+	// a failure in the success colour. Only the known kinds are honoured, so a
+	// hand-typed flash_type cannot inject a class name.
+	switch r.URL.Query().Get("flash_type") {
+	case flashSuccess:
+		data["FlashType"] = flashSuccess
+	case flashError:
+		data["FlashType"] = flashError
+	default:
+		data["FlashType"] = "info"
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	// ParseFS names templates by the base filename, not the full path.
 	if err := t.ExecuteTemplate(w, name, data); err != nil {
@@ -1321,7 +1334,15 @@ func safeReturnTo(v string) string {
 	return v
 }
 
-func (app *App) moduleRedirect(w http.ResponseWriter, r *http.Request, id, flash string) {
+// Flash kinds. These pick the toast's colour, so a failure cannot arrive
+// looking like a success — which is what happened while every flash on every
+// page was rendered as "info" regardless of what it said.
+const (
+	flashSuccess = "success"
+	flashError   = "error"
+)
+
+func (app *App) moduleRedirect(w http.ResponseWriter, r *http.Request, id, flash, kind string) {
 	// Where the form said it came from. This is the only reliable signal we
 	// have: every response sets `Referrer-Policy: no-referrer`, so the Referer
 	// below is ALWAYS empty and the fallback fired every time -- which is why
@@ -1356,29 +1377,33 @@ func (app *App) moduleRedirect(w http.ResponseWriter, r *http.Request, id, flash
 	if strings.Contains(dest, "?") {
 		sep = "&"
 	}
-	http.Redirect(w, r, dest+sep+"flash="+flash, http.StatusSeeOther)
+	dest += sep + "flash=" + flash
+	if kind != "" {
+		dest += "&flash_type=" + url.QueryEscape(kind)
+	}
+	http.Redirect(w, r, dest, http.StatusSeeOther)
 }
 
 func (app *App) handleModuleInstall(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	mod := app.findCatalogModule(id)
 	if mod == nil {
-		app.moduleRedirect(w, r, id, "Module+not+found:+"+id)
+		app.moduleRedirect(w, r, id, "Module+not+found:+"+id, flashError)
 		return
 	}
 	if err := app.installModule(mod); err != nil {
 		app.logger.Error("module install failed", "id", id, "err", err)
-		app.moduleRedirect(w, r, id, "Install+failed:+"+err.Error())
+		app.moduleRedirect(w, r, id, "Install+failed:+"+err.Error(), flashError)
 		return
 	}
-	app.moduleRedirect(w, r, id, mod.Name+"+installed+successfully")
+	app.moduleRedirect(w, r, id, mod.Name+"+installed+successfully", flashSuccess)
 }
 
 func (app *App) handleModuleUninstall(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if err := app.uninstallModule(id); err != nil {
 		app.logger.Error("module uninstall failed", "id", id, "err", err)
-		app.moduleRedirect(w, r, id, "Uninstall+failed:+"+err.Error())
+		app.moduleRedirect(w, r, id, "Uninstall+failed:+"+err.Error(), flashError)
 		return
 	}
 	// Sideloaded modules without a catalog entry have no detail page once
@@ -1391,15 +1416,15 @@ func (app *App) handleModuleUpdate(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	mod := app.findCatalogModule(id)
 	if mod == nil {
-		app.moduleRedirect(w, r, id, "Module+not+found:+"+id)
+		app.moduleRedirect(w, r, id, "Module+not+found:+"+id, flashError)
 		return
 	}
 	if err := app.installModule(mod); err != nil {
 		app.logger.Error("module update failed", "id", id, "err", err)
-		app.moduleRedirect(w, r, id, "Update+failed:+"+err.Error())
+		app.moduleRedirect(w, r, id, "Update+failed:+"+err.Error(), flashError)
 		return
 	}
-	app.moduleRedirect(w, r, id, mod.Name+"+updated+successfully")
+	app.moduleRedirect(w, r, id, mod.Name+"+updated+successfully", flashSuccess)
 }
 
 func (app *App) handleModuleUpdateAll(w http.ResponseWriter, r *http.Request) {

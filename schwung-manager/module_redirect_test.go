@@ -14,6 +14,9 @@
 package main
 
 import (
+	"html/template"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -53,7 +56,7 @@ func TestModuleRedirectPrefersReturnTo(t *testing.T) {
 	// Deliberately NO Referer — that is the live configuration.
 	w := httptest.NewRecorder()
 
-	app.moduleRedirect(w, r, "minijv", "ok")
+	app.moduleRedirect(w, r, "minijv", "ok", flashSuccess)
 
 	loc := w.Header().Get("Location")
 	if !strings.HasPrefix(loc, "/modules?flash=") {
@@ -71,7 +74,7 @@ func TestModuleRedirectFallsBackWhenNothingSaysOtherwise(t *testing.T) {
 	r := httptest.NewRequest(http.MethodPost, "/modules/minijv/install", nil)
 	w := httptest.NewRecorder()
 
-	app.moduleRedirect(w, r, "minijv", "ok")
+	app.moduleRedirect(w, r, "minijv", "ok", flashSuccess)
 
 	if loc := w.Header().Get("Location"); !strings.HasPrefix(loc, "/modules/minijv?flash=") {
 		t.Fatalf("Location = %q, want the detail-page fallback", loc)
@@ -87,7 +90,7 @@ func TestModuleRedirectIgnoresOffSiteReturnTo(t *testing.T) {
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()
 
-	app.moduleRedirect(w, r, "minijv", "ok")
+	app.moduleRedirect(w, r, "minijv", "ok", flashSuccess)
 
 	loc := w.Header().Get("Location")
 	if strings.Contains(loc, "evil.example") {
@@ -103,7 +106,7 @@ func TestModuleRedirectAcceptsAbsoluteReferer(t *testing.T) {
 	r.Header.Set("Referer", "http://move.local:7700/modules?sort=az")
 	w := httptest.NewRecorder()
 
-	app.moduleRedirect(w, r, "minijv", "ok")
+	app.moduleRedirect(w, r, "minijv", "ok", flashSuccess)
 
 	loc := w.Header().Get("Location")
 	if !strings.HasPrefix(loc, "/modules?sort=az") {
@@ -120,9 +123,56 @@ func TestModuleRedirectDoesNotStackFlashes(t *testing.T) {
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()
 
-	app.moduleRedirect(w, r, "minijv", "ok")
+	app.moduleRedirect(w, r, "minijv", "ok", flashSuccess)
 
 	if loc := w.Header().Get("Location"); strings.Count(loc, "flash=") != 1 {
 		t.Fatalf("Location = %q, want exactly one flash", loc)
+	}
+}
+
+// The toast's colour must survive the redirect, so a failed install cannot
+// arrive looking like a successful one — which is what happened while every
+// flash was rendered as "info".
+func TestModuleRedirectCarriesFlashKind(t *testing.T) {
+	for _, tc := range []struct{ kind, want string }{
+		{flashSuccess, "flash_type=success"},
+		{flashError, "flash_type=error"},
+	} {
+		app := &App{}
+		form := url.Values{"return_to": {"/modules"}}
+		r := httptest.NewRequest(http.MethodPost, "/modules/minijv/install",
+			strings.NewReader(form.Encode()))
+		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		w := httptest.NewRecorder()
+
+		app.moduleRedirect(w, r, "minijv", "msg", tc.kind)
+
+		if loc := w.Header().Get("Location"); !strings.Contains(loc, tc.want) {
+			t.Errorf("kind %q: Location = %q, want it to carry %q", tc.kind, loc, tc.want)
+		}
+	}
+}
+
+// Only the known kinds become a CSS class, so a hand-typed flash_type cannot
+// inject one.
+func TestRenderFlashTypeIsAllowlisted(t *testing.T) {
+	app := &App{
+		tmpl:   map[string]*template.Template{"t.html": template.Must(template.New("t.html").Parse("ok"))},
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	for _, tc := range []struct{ q, want string }{
+		{"success", "success"},
+		{"error", "error"},
+		{"", "info"},
+		{"evil\" onload=x", "info"},
+		{"warning", "info"}, // not wired up yet — must not pass through
+	} {
+		r := httptest.NewRequest(http.MethodGet, "/modules?flash=hi&flash_type="+url.QueryEscape(tc.q), nil)
+		data := map[string]any{}
+		w := httptest.NewRecorder()
+		app.render(w, r, "t.html", data)
+		if got := data["FlashType"]; got != tc.want {
+			t.Errorf("flash_type=%q -> FlashType %v, want %q", tc.q, got, tc.want)
+		}
 	}
 }

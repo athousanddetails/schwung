@@ -171,6 +171,10 @@
     // and route sets on slot 0 (the manager dispatches by the overtake_dsp: key
     // prefix), rather than a per-slot subscribe.
     var isTool = query.get("tool") === "1";
+    // Master FX pop-out: subscribe_master_fx, and writes go through
+    // set_master_fx_param — the key already carries its "master_fx:fxN:"
+    // prefix, so there is no slot to address.
+    var isMasterFx = query.get("master_fx") === "1";
 
     var wsUrl = (window.location.protocol === "https:" ? "wss://" : "ws://") +
         window.location.host + "/ws/remote-ui";
@@ -235,7 +239,9 @@
 
         ws.onopen = function () {
             reconnectDelay = 1000;
-            if (isTool) {
+            if (isMasterFx) {
+                ws.send(JSON.stringify({ type: "subscribe_master_fx" }));
+            } else if (isTool) {
                 ws.send(JSON.stringify({ type: "subscribe_tool" }));
             } else {
                 ws.send(JSON.stringify({ type: "subscribe", slot: slot }));
@@ -273,6 +279,14 @@
 
         setParam: function (key, value) {
             if (ws && ws.readyState === WebSocket.OPEN) {
+                if (isMasterFx) {
+                    ws.send(JSON.stringify({
+                        type: "set_master_fx_param",
+                        key: key,
+                        value: String(value)
+                    }));
+                    return;
+                }
                 ws.send(JSON.stringify({
                     type: "set_param",
                     slot: isTool ? 0 : slot,
@@ -304,8 +318,10 @@
             // Re-request a fresh push over our own socket. Tool pop-out uses the
             // params-only refetch (a full subscribe would re-send custom_ui).
             if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify(isTool ? { type: "refetch_tool" }
-                                              : { type: "subscribe", slot: slot }));
+                ws.send(JSON.stringify(
+                    isMasterFx ? { type: "subscribe_master_fx" }
+                  : isTool     ? { type: "refetch_tool" }
+                               : { type: "subscribe", slot: slot }));
             }
         }
     };

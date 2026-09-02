@@ -1121,12 +1121,10 @@ CHAIN_INTERNAL void chain_auto_cc_refresh(chain_instance_t *inst, const char *sy
                  inst->auto_cc_count, total, auto_cc_pool_size(inst),
                  (inst->auto_cc_count < total) ? "  ** POOL EXHAUSTED **" : "");
         v2_chain_log(inst, line);
-        for (int i = 0; i < inst->auto_cc_count; i++) {
-            snprintf(line, sizeof(line), "auto-cc:   CC %3u -> %s:%s",
-                     (unsigned)inst->auto_cc[i].cc,
-                     inst->auto_cc[i].target, inst->auto_cc[i].param);
-            v2_chain_log(inst, line);
-        }
+        /* The summary only. The full table used to be printed here, one line
+         * per parameter, because it was the only way to see it -- ~97 lines on
+         * every module load. Slot Settings > MIDI > CC Map now shows it on the
+         * device, so the log keeps the one line that says the build worked. */
     }
 }
 

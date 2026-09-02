@@ -338,19 +338,24 @@ export const SLOT_MIDI_PARAMS = [
  * and the cell has no room to always say both.
  */
 export function ccMapMenu(raw) {
+    /* "cc|target|key|Display Name;" -- pipe, not comma, because a display
+     * name may contain one. */
     const rows = String(raw || "").split(";").filter(Boolean);
     const parsed = [];
     for (const r of rows) {
-        const bits = r.split(",");
+        const bits = r.split("|");
         if (bits.length < 3) continue;
-        parsed.push({ cc: bits[0], target: bits[1], param: bits.slice(2).join(",") });
+        parsed.push({
+            cc: bits[0], target: bits[1], param: bits[2],
+            label: (bits[3] && bits[3].length) ? bits[3] : bits[2],
+        });
     }
     if (!parsed.length) return [{ label: "No mapping", action: "cc_map_none" }];
 
     const multi = parsed.some((e) => e.target !== parsed[0].target);
     return parsed.map((e) => {
         const where = multi ? shortTarget(e.target) + " " : "";
-        return { label: e.cc + "  " + where + e.param, action: "cc_map_row" };
+        return { label: e.cc + "  " + where + e.label, action: "cc_map_row" };
     });
 }
 

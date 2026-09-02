@@ -8328,6 +8328,18 @@ function buildSlotPatchJson(slotIndex, name, forAutosave, moduleChanged) {
     const knobCcOut = getSlotParam(slotIndex, "knob_cc_out");
     if (knobCcOut !== null) patch.knob_cc_out = parseInt(knobCcOut) ? 1 : 0;
 
+    /* CC gates, same reasoning as knob_cc_out above: runtime-only would mean a
+     * slot you muted for CC comes back listening after a reload, which is the
+     * opposite of what the switch is for. Absence still means ON when loading,
+     * so patches written before this keep working. */
+    const ccControl = getSlotParam(slotIndex, "cc_control");
+    if (ccControl !== null) patch.cc_control = parseInt(ccControl) ? 1 : 0;
+    const ccMask = getSlotParam(slotIndex, "cc_component_mask");
+    if (ccMask !== null && ccMask !== "") {
+        const m = parseInt(ccMask, 10);
+        if (Number.isFinite(m)) patch.cc_component_mask = m;
+    }
+
     /* Include knob mappings */
     const knobMappingsJson = getSlotParam(slotIndex, "knob_mappings");
     if (knobMappingsJson) {

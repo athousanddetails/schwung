@@ -991,6 +991,11 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         inst->dirty = 1;
         return;
     }
+    else if (strcmp(key, "cc_component_mask") == 0) {
+        if (val && val[0]) inst->cc_component_mask = (unsigned)strtoul(val, NULL, 10);
+        inst->dirty = 1;
+        return;
+    }
     else if (strncmp(key, "cc_control:", 11) == 0) {
         /* Per-component: "cc_control:synth", "cc_control:fx1", ... */
         int bit = chain_cc_component_bit(key + 11);
@@ -1476,6 +1481,11 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         return snprintf(buf, buf_len, "%d",
                         chain_cc_component_enabled(inst, key + 11) ? 1 : 0);
     }
+    /* Raw mask, so the patch can round-trip every component in one field
+     * rather than one key per component. */
+    if (strcmp(key, "cc_component_mask") == 0) {
+        return snprintf(buf, buf_len, "%u", inst->cc_component_mask);
+    }
     /*
      * The whole auto-CC map as "cc,target,param;" records, for the MIDI page.
      *
@@ -1488,8 +1498,16 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         int off = 0;
         for (int i = 0; i < inst->auto_cc_count; i++) {
             const auto_cc_t *a = &inst->auto_cc[i];
-            int n = snprintf(buf + off, (size_t)(buf_len - off), "%u,%s,%s;",
-                             (unsigned)a->cc, a->target, a->param);
+            /* The DISPLAY name, not the key. "bd_c_tune" is what the module
+             * author called it; "BD Tune" is what every other screen shows,
+             * and a map the user cannot match against the LFO target picker
+             * is not a map. Falls back to the key when a module declares no
+             * name, which is better than an empty row. */
+            const chain_param_info_t *pi =
+                knob_find_param(inst, a->target, a->param);
+            const char *label = (pi && pi->name[0]) ? pi->name : a->param;
+            int n = snprintf(buf + off, (size_t)(buf_len - off), "%u|%s|%s|%s;",
+                             (unsigned)a->cc, a->target, a->param, label);
             if (n < 0 || n >= buf_len - off) break;   /* truncate cleanly */
             off += n;
         }

@@ -1086,7 +1086,11 @@ CHAIN_INTERNAL void chain_auto_cc_refresh(chain_instance_t *inst, const char *sy
     int pool_idx = 0;
     char target[16];
     for (int i = 0; i < inst->midi_fx_count && i < MAX_MIDI_FX; i++) {
-        snprintf(target, sizeof(target), "midi_fx%d", i);
+        /* 1-based id: chain_fx_index_from_id maps "fx1" to index 0, and every
+         * other consumer (knob_find_param, the knob editor, get_param
+         * readback) spells it that way. Emitting "fx0" here made every FX
+         * assignment unresolvable -- invisible while no FX was loaded. */
+        snprintf(target, sizeof(target), "midi_fx%d", i + 1);
         auto_cc_add_component(inst, target, inst->midi_fx_params[i],
                               inst->midi_fx_param_counts[i],
                               inst->midi_fx_ui_hierarchy[i], &pool_idx);
@@ -1094,7 +1098,7 @@ CHAIN_INTERNAL void chain_auto_cc_refresh(chain_instance_t *inst, const char *sy
     auto_cc_add_component(inst, "synth", inst->synth_params,
                           inst->synth_param_count, synth_hier, &pool_idx);
     for (int i = 0; i < inst->fx_count && i < MAX_AUDIO_FX; i++) {
-        snprintf(target, sizeof(target), "fx%d", i);
+        snprintf(target, sizeof(target), "fx%d", i + 1);
         auto_cc_add_component(inst, target, inst->fx_params[i],
                               inst->fx_param_counts[i],
                               inst->fx_ui_hierarchy[i], &pool_idx);
@@ -1249,12 +1253,12 @@ CHAIN_INTERNAL int chain_cc_component_bit(const char *target)
     if (!target) return -1;
     if (strcmp(target, "synth") == 0) return 0;
     if (strncmp(target, "midi_fx", 7) == 0) {
-        int i = atoi(target + 7);
+        int i = atoi(target + 7) - 1;          /* "midi_fx1" -> 0 */
         if (i >= 0 && i < MAX_MIDI_FX) return 9 + i;
         return -1;
     }
     if (strncmp(target, "fx", 2) == 0) {
-        int i = atoi(target + 2);
+        int i = atoi(target + 2) - 1;          /* "fx1" -> 0 */
         if (i >= 0 && i < MAX_AUDIO_FX) return 1 + i;
         return -1;
     }

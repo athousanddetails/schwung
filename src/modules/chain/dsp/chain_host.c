@@ -1476,6 +1476,25 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         return snprintf(buf, buf_len, "%d",
                         chain_cc_component_enabled(inst, key + 11) ? 1 : 0);
     }
+    /*
+     * The whole auto-CC map as "cc,target,param;" records, for the MIDI page.
+     *
+     * One read rather than a per-entry query: the map is ~97 rows and a read
+     * costs ~2.8ms, so asking row by row would cost most of a second and the
+     * page would paint in pieces. It fits comfortably in SHADOW_PARAM_VALUE_LEN
+     * (64KB) at roughly 25 bytes a row.
+     */
+    if (strcmp(key, "auto_cc_map") == 0) {
+        int off = 0;
+        for (int i = 0; i < inst->auto_cc_count; i++) {
+            const auto_cc_t *a = &inst->auto_cc[i];
+            int n = snprintf(buf + off, (size_t)(buf_len - off), "%u,%s,%s;",
+                             (unsigned)a->cc, a->target, a->param);
+            if (n < 0 || n >= buf_len - off) break;   /* truncate cleanly */
+            off += n;
+        }
+        return off;
+    }
     if (strcmp(key, "knob_cc_out") == 0) {
         return snprintf(buf, buf_len, "%d", inst->knob_cc_out ? 1 : 0);
     }

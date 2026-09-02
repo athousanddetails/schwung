@@ -292,7 +292,77 @@ export const SLOT_GRID_ACTIONS = [
 /**
  * @param {boolean} hasPreset  whether this slot already holds a saved preset
  */
-export function slotGridHierarchy(hasPreset) {
+/*
+ * The MIDI page.
+ *
+ * Every parameter of a loaded chain has an auto-assigned CC (see auto_cc_t in
+ * the chain DSP), which is what lets a 16-encoder surface reach a whole module
+ * without paging on Move. That is only usable if it can be switched off: with
+ * every parameter addressable, any controller sending CC on the slot's channel
+ * moves something, so "notes yes, CC no" has to be expressible.
+ *
+ * Two granularities, because a slot is a chain of parts by different authors:
+ * the whole slot, and one component. Both default On, and both gate the learn
+ * echo as well as incoming CC.
+ *
+ * FX3 and MIDI FX 2+ are deliberately absent: eight cells is one page, and a
+ * ninth would push the page into an overflow the user has no reason to visit.
+ * The components declared here cover every chain the fleet actually ships.
+ */
+export const SLOT_MIDI_PARAMS = [
+    { key: "cc_all", name: "CC Ctrl", type: "enum",
+      options: ["Off", "On"], short_options: ["OFF", "ON"], default: 1 },
+    { key: "cc_synth", name: "Synth", type: "enum",
+      options: ["Off", "On"], short_options: ["OFF", "ON"], default: 1 },
+    { key: "cc_fx1", name: "FX 1", type: "enum",
+      options: ["Off", "On"], short_options: ["OFF", "ON"], default: 1 },
+    { key: "cc_fx2", name: "FX 2", type: "enum",
+      options: ["Off", "On"], short_options: ["OFF", "ON"], default: 1 },
+    { key: "cc_fx3", name: "FX 3", type: "enum",
+      options: ["Off", "On"], short_options: ["OFF", "ON"], default: 1 },
+    { key: "cc_mfx1", name: "MIDI FX", type: "enum",
+      options: ["Off", "On"], short_options: ["OFF", "ON"], default: 1 },
+];
+
+/*
+ * "12,synth,bd_c_tune;13,synth,bd_c_attack;..." -> menu rows.
+ *
+ * Read-only: every row is an entry with a name and no consequence, which is
+ * the one thing a menu page is not usually for. It earns the page anyway
+ * because the alternative is a map that exists only in a log file -- a user
+ * has no way to learn which CC reaches which parameter except by turning all
+ * 97 and listening.
+ *
+ * The component prefix is dropped for a single-component chain (the common
+ * case) and kept otherwise, because "FX1 mix" and "mix" are different answers
+ * and the cell has no room to always say both.
+ */
+export function ccMapMenu(raw) {
+    const rows = String(raw || "").split(";").filter(Boolean);
+    const parsed = [];
+    for (const r of rows) {
+        const bits = r.split(",");
+        if (bits.length < 3) continue;
+        parsed.push({ cc: bits[0], target: bits[1], param: bits.slice(2).join(",") });
+    }
+    if (!parsed.length) return [{ label: "No mapping", action: "cc_map_none" }];
+
+    const multi = parsed.some((e) => e.target !== parsed[0].target);
+    return parsed.map((e) => {
+        const where = multi ? shortTarget(e.target) + " " : "";
+        return { label: e.cc + "  " + where + e.param, action: "cc_map_row" };
+    });
+}
+
+/** "fx1" -> "FX1", "midi_fx1" -> "MF1", "synth" -> "SY". */
+function shortTarget(t) {
+    if (t === "synth") return "SY";
+    if (t.startsWith("midi_fx")) return "MF" + t.slice(7);
+    if (t.startsWith("fx")) return "FX" + t.slice(2);
+    return t;
+}
+
+export function slotGridHierarchy(hasPreset, ccMapRaw) {
     const menu = SLOT_GRID_ACTIONS
         .filter((a) => a.always || hasPreset)
         .map((a) => ({ label: a.label, action: a.action }));
@@ -312,23 +382,60 @@ export function slotGridHierarchy(hasPreset) {
             params: SLOT_GRID_PARAMS.map((p) => ({ key: p.key }))
                 .concat([{ level: "lfo1", label: "LFO 1" },
                          { level: "lfo2", label: "LFO 2" },
-                         { level: "actions", label: "Actions" }]),
+                         { level: "actions", label: "Actions" },
+                         /* After Actions: a level emits straight after the
+                          * entry that navigates to it, so listing MIDI last
+                          * puts the page last. */
+                         { level: "midi", label: "MIDI" }]),
         },
     };
     Object.assign(levels, lfoLevels([1, 2]));
     levels.actions = { label: "Actions", knobs: [], params: [], menu: menu, menu_label: "Actions" };
+    levels.midi = {
+        label: "MIDI",
+        knobs: SLOT_MIDI_PARAMS.map((p) => p.key),
+        params: SLOT_MIDI_PARAMS.map((p) => ({ key: p.key }))
+            .concat([{ level: "ccmap", label: "CC Map" }]),
+    };
+    levels.ccmap = {
+        label: "CC Map", knobs: [], params: [],
+        menu: ccMapMenu(ccMapRaw), menu_label: "CC Map",
+    };
     return { modes: null, levels };
 }
 
 /** Every declared param across the slot page and both LFO pages. */
 export function allSlotGridParams() {
-    return SLOT_GRID_PARAMS.concat(lfoParams(1)).concat(lfoParams(2));
+    return SLOT_GRID_PARAMS.concat(lfoParams(1)).concat(lfoParams(2))
+                           .concat(SLOT_MIDI_PARAMS);
 }
 
 /** Which real param key a grid key reads and writes, or null when derived. */
 export function realKeyFor(gridKey) {
     if (gridKey === "mpe_mode") return null;            /* derived, see below */
     if (gridKey === "midi_fx_pre_mode") return "midi_fx_pre_mode";  /* bare */
+    /* CC gates are bare too: the chain DSP serves "cc_control" and
+     * "cc_control:<component>" directly, and "slot:" would address a param
+     * that does not exist and read empty -- which for a TOGGLE is worse than
+     * failing, since an unreadable Off makes the next click write On to
+     * something already on. */
+    /*
+     * CC gates map to bare device keys, and the GRID key deliberately carries
+     * no colon.
+     *
+     * bare() strips everything up to the FIRST colon, so a grid key spelled
+     * "cc_control:synth" arrives here as "synth" whenever the caller does not
+     * prefix it -- and "slot:synth" reads empty. For a TOGGLE an unreadable
+     * value is worse than an error: shown as Off, the next click writes On to
+     * something that was already on. Colon-free keys make the mapping explicit
+     * and immune to how the caller spells the prefix.
+     */
+    if (gridKey === "cc_all") return "cc_control";
+    if (gridKey === "cc_synth") return "cc_control:synth";
+    if (gridKey === "cc_fx1") return "cc_control:fx1";
+    if (gridKey === "cc_fx2") return "cc_control:fx2";
+    if (gridKey === "cc_fx3") return "cc_control:fx3";
+    if (gridKey === "cc_mfx1") return "cc_control:midi_fx1";
     /* LFO params are declared with their real prefix already ("lfo1:shape"),
      * the same one makeSlotLfoCtx uses, so they pass straight through. Adding
      * "slot:" would address a param that does not exist and read empty. */
@@ -369,7 +476,14 @@ export function createSlotGridIo(io) {
     return {
         getParam(fullKey) {
             const k = bare(fullKey);
-            if (k === "ui_hierarchy") return JSON.stringify(slotGridHierarchy(!!io.hasPreset()));
+            if (k === "ui_hierarchy") {
+                /* One read, on entry only -- ui_hierarchy is not fetched on the
+                 * draw path. The whole map comes back in a single call rather
+                 * than a row at a time: 97 reads at ~2.8ms each would cost most
+                 * of a second and paint the page in pieces. */
+                const map = io.readSlotParam ? io.readSlotParam("auto_cc_map") : "";
+                return JSON.stringify(slotGridHierarchy(!!io.hasPreset(), map));
+            }
             if (k === "chain_params") return JSON.stringify(allSlotGridParams());
             if (k === "mpe_mode") return io.isMpeMode() ? "1" : "0";
             if (k === "forward_channel") {

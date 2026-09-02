@@ -104,6 +104,8 @@ let currentPrefix = 'synth';
  */
 let currentChrome = null;
 
+
+
 /**
  * Shift state does NOT arrive as MIDI here.
  *
@@ -351,6 +353,11 @@ export function enterParamPages(slot, component, prefix, restorePageName, io, ch
 }
 
 export function exitParamPages() {
+    /* Leaving the grid drops any held step. Its note-off will be delivered to
+     * whatever screen took over and never reach the controller, which would
+     * otherwise come back still believing a step was down and quietly turn the
+     * next knob turn into a lock. */
+    if (controller && typeof controller.clearHeldStep === 'function') controller.clearHeldStep();
     /*
      * GIVE THE RINGS BACK, DO NOT JUST TURN THEM OFF.
      *
@@ -1276,6 +1283,7 @@ export function announceParamPageContents() {
 export function clearParamPagesTouch() {
     if (controller && typeof controller.clearTouch === 'function') controller.clearTouch();
 }
+
 
 /** The section picker, for anything that wants to drive it from outside. */
 export function paramPagesJumpIndex() {

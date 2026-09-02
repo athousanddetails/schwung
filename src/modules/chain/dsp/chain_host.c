@@ -167,6 +167,7 @@ void v2_unload_synth(chain_instance_t *inst) {
     inst->synth_instance = NULL;
     inst->current_synth_module[0] = '\0';
     inst->synth_param_count = 0;
+    inst->cc_control = 1;   /* auto-CC on by default; a patch may turn it off */
     inst->mod_param_refresh_ms_synth = 0;
     inst->synth_default_forward_channel = -1;
     inst->synth_bypassed = 0;
@@ -548,6 +549,46 @@ int v2_load_synth(chain_instance_t *inst, const char *module_name) {
     }
     inst->mod_param_refresh_ms_synth = 0;
 
+    /*
+     * module.json is allowed to declare no params: a module may expose its
+     * parameter contract only from the DSP at runtime (9w9 does exactly this,
+     * carrying state as a string instead). parse_chain_params then yields zero
+     * and every consumer that reads synth_params sees an empty module. Ask the
+     * plugin directly so the auto-CC table has something to assign.
+     *
+     * Done here, on the load path, and never from the MIDI path: the refresh
+     * puts a chain_param_info_t[MAX_CHAIN_PARAMS] on the stack -- about 1 MB --
+     * which the audio thread cannot afford.
+     */
+    if (inst->synth_param_count <= 0) {
+        chain_mod_refresh_target_param_cache(inst, "synth");
+    }
+    {
+        /* ui_hierarchy drives the CC ORDER (see auto_cc_add_component): the
+         * knobs arrays are the on-screen page order, so assignment follows
+         * what the user actually sees rather than declaration order. Fetched
+         * here rather than cached: it is only needed while building the table,
+         * and a synth copy would add 64 KB per position for nothing. */
+        char *hier = (char *)calloc(1, 262144);
+        int hlen = 0;
+        /* A module may serve its page layout under either key: ui_hierarchy is
+         * the documented one, ui_pages is what several modules actually export.
+         * Try both before falling back to declaration order. */
+        if (hier && api->get_param) {
+            hlen = api->get_param(synth_inst, "ui_hierarchy", hier, 262144);
+            if (hlen <= 0)
+                hlen = api->get_param(synth_inst, "ui_pages", hier, 262144);
+        }
+        {
+            char dbg[240];
+            snprintf(dbg, sizeof(dbg), "auto-cc: layout len=%d head=%.150s",
+                     hlen, (hlen > 0 && hier) ? hier : "(none)");
+            v2_chain_log(inst, dbg);
+        }
+        chain_auto_cc_refresh(inst, (hlen > 0) ? hier : NULL);
+        free(hier);
+    }
+
     /* Parse default_forward_channel from capabilities in module.json */
     inst->synth_default_forward_channel = -1;  /* Default: no forwarding preference */
     inst->synth_consumes_line_input = 0;       /* Default: not a line-input consumer */
@@ -879,6 +920,7 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
             inst->loaded_forward_channel = temp_patch.forward_channel;
             inst->midi_fx_pre_mode = temp_patch.midi_fx_pre_mode ? 1 : 0;
             inst->knob_cc_out = temp_patch.knob_cc_out ? 1 : 0;
+            inst->cc_control  = temp_patch.cc_control ? 1 : 0;
             knob_emit_cc_out_all(inst);
             /* Check for "modified" field to restore dirty state */
             FILE *mf = fopen(val, "r");
@@ -941,6 +983,11 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         inst->current_patch = -1;
         inst->dirty = 0;
         malloc_trim(0);
+    }
+    else if (strcmp(key, "cc_control") == 0) {
+        inst->cc_control = (val && (val[0] == '1' || val[0] == 't')) ? 1 : 0;
+        inst->dirty = 1;
+        return;
     }
     else if (strcmp(key, "knob_cc_out") == 0) {
         int new_mode = (val && atoi(val)) ? 1 : 0;
@@ -1023,6 +1070,17 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
             if (inst->synth_plugin_v2 && inst->synth_instance && inst->synth_plugin_v2->set_param) {
                 inst->synth_plugin_v2->set_param(inst->synth_instance, subkey, val);
             }
+            /*
+             * Tell any listening surface which CC owns this parameter, so a
+             * controller in learn mode captures it while the user turns the
+             * Move pot for it.
+             *
+             * Here, not in the modulation branch above: that one only runs
+             * when the parameter already has a live LFO on it, so hooking it
+             * meant learn fired for modulated parameters and silently did
+             * nothing for every ordinary one.
+             */
+            auto_cc_emit(inst, "synth", subkey, val);
             inst->dirty = 1;
         }
     }
@@ -1397,6 +1455,9 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         }
         if (v == PATCH_CHANNEL_UNSET) return 0;  /* absent — caller skips */
         return snprintf(buf, buf_len, "%d", v);
+    }
+    if (strcmp(key, "cc_control") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->cc_control ? 1 : 0);
     }
     if (strcmp(key, "knob_cc_out") == 0) {
         return snprintf(buf, buf_len, "%d", inst->knob_cc_out ? 1 : 0);

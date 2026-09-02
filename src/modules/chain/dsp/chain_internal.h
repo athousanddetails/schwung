@@ -108,6 +108,33 @@ typedef struct {
                           * maps to one CC step emits once, not once per turn. */
 } knob_mapping_t;
 
+/*
+ * Auto-assigned CC map.
+ *
+ * The eight knob mappings cover eight parameters per slot at four fixed CC
+ * numbers. Everything else in a module is unreachable from an external
+ * controller -- the real limitation is not the count of eight, but that a
+ * controller sending anything other than 71-78 / 102-109 touches nothing.
+ *
+ * This table gives EVERY parameter of a loaded chain a stable CC address, so a
+ * 16-encoder surface can reach a whole module without changing pages on Move.
+ * It is DERIVED, never persisted: rebuilt from chain_params whenever the
+ * position parameter signature changes, so no patch format changes and an old
+ * patch loads bit-identically. Assignment is by declaration order, which is
+ * stable for a given module version.
+ *
+ * Parameters already bound to one of the eight knobs are skipped, so a knob
+ * and an auto CC never drive the same target from two addresses.
+ */
+#define MAX_AUTO_CC 128
+typedef struct {
+    uint8_t cc;
+    char target[16];     /* "synth", "fx0".., "midi_fx0".. */
+    char param[32];
+    int last_cc_out;     /* last value emitted, -1 = never; change detection at
+                          * CC resolution so a slow sweep emits once per step */
+} auto_cc_t;
+
 /* Chain parameter info from module.json */
 #define MAX_CHAIN_PARAMS 256
 #define MAX_ENUM_OPTIONS 128
@@ -210,6 +237,7 @@ typedef struct {
     int receive_channel;   /* PATCH_CHANNEL_UNSET=absent, 0=All, 1-16=specific channel */
     int forward_channel;   /* PATCH_CHANNEL_UNSET=absent, -2=passthrough, -1=auto, 0-15=channel */
     int midi_fx_pre_mode;  /* 0 = Post (default), 1 = Pre (additive inject to Move MIDI_IN) */
+    int cc_control;        /* 1 = auto-CC in/out for this slot (default on) */
     int knob_cc_out;       /* 0 = off (default), 1 = echo chain-knob changes out
                             * as CC 102-109 on the slot's recv channel */
     lfo_state_t lfos[LFO_COUNT];  /* LFO configuration */
@@ -307,6 +335,18 @@ typedef struct chain_instance {
     knob_mapping_t knob_mappings[MAX_KNOB_MAPPINGS];
     int knob_mapping_count;
     uint64_t knob_last_time_ms[MAX_KNOB_MAPPINGS];  /* For acceleration */
+
+    /* Derived auto-CC map (see auto_cc_t). auto_cc_sig is the parameter-count
+     * signature the table was built from; when it changes, the module was
+     * swapped or its params reloaded, and the table is rebuilt. */
+    auto_cc_t auto_cc[MAX_AUTO_CC];
+    int auto_cc_count;
+    int auto_cc_sig;
+
+    /* 1 = this slot responds to auto-assigned CC and echoes param changes back
+     * out for controller learn; 0 = off. Default on. Persisted per patch, so a
+     * slot can take notes without its parameters being moved by stray CC. */
+    int cc_control;
 
     /* Runtime modulation bus state */
     mod_target_state_t mod_targets[MAX_MOD_TARGETS];
@@ -548,6 +588,10 @@ CHAIN_INTERNAL chain_param_info_t *find_param_info(chain_param_info_t *params, i
 CHAIN_INTERNAL int format_param_value(chain_param_info_t *param, float value, char *buf, int buf_len);
 CHAIN_INTERNAL int is_smoothable_float(const char *val, float *out_value);
 CHAIN_INTERNAL chain_param_info_t *knob_find_param(chain_instance_t *inst, const char *target, const char *param);
+CHAIN_INTERNAL void chain_auto_cc_refresh(chain_instance_t *inst, const char *synth_hier);
+CHAIN_INTERNAL void auto_cc_emit(chain_instance_t *inst, const char *target,
+                                 const char *param, const char *val_str);
+CHAIN_INTERNAL auto_cc_t *chain_auto_cc_find(chain_instance_t *inst, uint8_t cc);
 CHAIN_INTERNAL void knob_forward_value(chain_instance_t *inst, const char *target, const char *param, const char *val_str);
 
 /* Echo one chain knob's current value to the external port as CC 102-109 on

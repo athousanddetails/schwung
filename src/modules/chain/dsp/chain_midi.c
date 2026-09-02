@@ -884,7 +884,50 @@ void v2_on_midi(void *instance, const uint8_t *msg, int len, int source) {
                     return;
                 }
             }
-            return;  /* CC 102-109 consumed even if unmapped — don't forward to synth */
+            /*
+             * Unmapped 102-109 used to be swallowed here. With no knob
+             * mappings at all the range is dead, and the auto map is allowed
+             * to claim it (see AUTO_CC_KNOB_SPILL) -- so fall through in that
+             * case instead of eating the CC. When knobs ARE mapped the range
+             * belongs to them and is still consumed, forwarded to nothing,
+             * exactly as before.
+             */
+            if (inst->knob_mapping_count > 0) return;
+        }
+
+        /*
+         * Auto-assigned CC -> any parameter of the loaded chain.
+         *
+         * Runs AFTER both legacy blocks, so 71-78 and 102-109 keep their exact
+         * previous meaning and an existing patch behaves identically. Reaches
+         * everything those eight knobs cannot, which is what lets a 16-encoder
+         * surface address a whole module without paging on Move.
+         *
+         * Absolute, like 102-109: the sender owns the value and 0-127 spans the
+         * declared range. No CC is echoed back -- a controller that listens to
+         * its own output would fight the user mid-turn, the same reasoning the
+         * absolute knob block records.
+         */
+        if (inst->cc_control) {
+            auto_cc_t *a = chain_auto_cc_find(inst, cc);
+            if (a) {
+                chain_param_info_t *pinfo = knob_find_param(inst, a->target, a->param);
+                if (!pinfo) return;   /* assigned but unresolvable: consume, do not forward */
+
+                float v = pinfo->min_val +
+                          ((float)msg[2] / 127.0f) * (pinfo->max_val - pinfo->min_val);
+                int is_int = (pinfo->type == KNOB_TYPE_INT || pinfo->type == KNOB_TYPE_ENUM);
+                if (is_int) v = (float)((int)(v + 0.5f));
+                if (v < pinfo->min_val) v = pinfo->min_val;
+                if (v > pinfo->max_val) v = pinfo->max_val;
+
+                char val_str[16];
+                if (is_int) snprintf(val_str, sizeof(val_str), "%d", (int)v);
+                else        snprintf(val_str, sizeof(val_str), "%.3f", v);
+
+                knob_forward_value(inst, a->target, a->param, val_str);
+                return;   /* consumed, like every other mapped CC */
+            }
         }
     }
 

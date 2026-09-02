@@ -909,6 +909,235 @@ chain_param_info_t *find_param_info(chain_param_info_t *params, int count, const
  * five-FX chain got a target it could route but not modulate. The bound is
  * MAX_AUDIO_FX / MAX_MIDI_FX so the next cap bump needs no edit here.
  */
+/*
+ * CC numbers an auto-assignment may use.
+ *
+ * Excluded, and why:
+ *   0, 32        bank select
+ *   1, 7, 10, 11 mod wheel / volume / pan / expression -- any keyboard sends
+ *                these, and a stray one would move a parameter by accident
+ *   6, 38        data entry
+ *   64           sustain, same reason as above
+ *   71-78        Move own knobs (relative), already claimed by knob_mappings
+ *   96-101       RPN / NRPN
+ *   102-109      the absolute knob range, already claimed
+ *   120-127      channel mode
+ * Leaves 83 usable numbers per channel, which is more than any current module
+ * declares.
+ */
+static const uint8_t AUTO_CC_POOL[] = {
+    12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,
+    33,34,35,36,37,
+    39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,
+    65,66,67,68,69,70,
+    79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,
+    110,111,112,113,114,115,116,117,118,119
+};
+#define AUTO_CC_POOL_LEN ((int)(sizeof(AUTO_CC_POOL)/sizeof(AUTO_CC_POOL[0])))
+
+/* True when target/param is already driven by one of the eight knobs. */
+static int auto_cc_is_on_knob(chain_instance_t *inst, const char *target, const char *param)
+{
+    for (int i = 0; i < inst->knob_mapping_count && i < MAX_KNOB_MAPPINGS; i++) {
+        if (!inst->knob_mappings[i].param[0]) continue;
+        if (strcmp(inst->knob_mappings[i].target, target) == 0 &&
+            strcmp(inst->knob_mappings[i].param, param) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+/* Already assigned in this rebuild? */
+static int auto_cc_have(chain_instance_t *inst, const char *target, const char *param)
+{
+    for (int i = 0; i < inst->auto_cc_count; i++)
+        if (strcmp(inst->auto_cc[i].target, target) == 0 &&
+            strcmp(inst->auto_cc[i].param, param) == 0) return 1;
+    return 0;
+}
+
+/*
+ * Knob CCs are only spoken for when a knob mapping actually uses them.
+ *
+ * 71-78 and 102-109 are reserved for the eight chain knobs, but a slot with no
+ * knob mappings never matches either range -- the relative block falls through
+ * and the absolute block swallows the CC and does nothing. Those sixteen
+ * addresses are dead in that state, and handing them to the auto map is the
+ * difference between covering a module and leaving its last pages unreachable.
+ * knob_mapping_count is part of the rebuild signature, so assigning a knob
+ * later rebuilds the table without them.
+ */
+static const uint8_t AUTO_CC_KNOB_SPILL[] = {
+    71,72,73,74,75,76,77,78, 102,103,104,105,106,107,108,109
+};
+#define AUTO_CC_SPILL_LEN ((int)(sizeof(AUTO_CC_KNOB_SPILL)/sizeof(AUTO_CC_KNOB_SPILL[0])))
+
+static int auto_cc_pool_size(chain_instance_t *inst)
+{
+    return AUTO_CC_POOL_LEN +
+           ((inst->knob_mapping_count == 0) ? AUTO_CC_SPILL_LEN : 0);
+}
+
+static uint8_t auto_cc_pool_at(int idx)
+{
+    if (idx < AUTO_CC_POOL_LEN) return AUTO_CC_POOL[idx];
+    return AUTO_CC_KNOB_SPILL[idx - AUTO_CC_POOL_LEN];
+}
+
+static void auto_cc_assign_one(chain_instance_t *inst, const char *target,
+                               const char *key, int *pool_idx)
+{
+    if (inst->auto_cc_count >= MAX_AUTO_CC) return;
+    if (*pool_idx >= auto_cc_pool_size(inst)) return;
+    if (!key || !key[0]) return;
+    if (auto_cc_is_on_knob(inst, target, key)) return;
+    if (auto_cc_have(inst, target, key)) return;
+
+    auto_cc_t *a = &inst->auto_cc[inst->auto_cc_count++];
+    a->cc = auto_cc_pool_at((*pool_idx)++);
+    a->last_cc_out = -1;
+    snprintf(a->target, sizeof(a->target), "%s", target);
+    snprintf(a->param, sizeof(a->param), "%s", key);
+}
+
+/*
+ * Assign a component in the order its own UI presents it.
+ *
+ * Declaration order is whatever the module author happened to write and bears
+ * no relation to the pages a user sees, so CC 12 landing on a hidden note-map
+ * enum while the first knob on screen sits at CC 40 is not a bug but it is
+ * useless. ui_hierarchy.levels.<level>.knobs[] is the knob-grid order for each
+ * page, so walking those arrays in document order assigns CCs in the order the
+ * parameters actually appear -- first pot on the first page gets the first CC.
+ *
+ * Anything the pages do not mention still gets an address afterwards, so no
+ * parameter is unreachable.
+ */
+static void auto_cc_add_component(chain_instance_t *inst, const char *target,
+                                  const chain_param_info_t *params, int count,
+                                  const char *hier, int *pool_idx)
+{
+    /* Pass 1: page order, straight out of the knobs arrays. */
+    if (hier && hier[0]) {
+        const char *p = hier;
+        while ((p = strstr(p, "\"knobs\"")) != NULL) {
+            p += 7;
+            const char *lb = strchr(p, '[');
+            const char *rb = lb ? strchr(lb, ']') : NULL;
+            if (!lb || !rb) break;
+            const char *q = lb;
+            while (q < rb) {
+                const char *k1 = strchr(q, '"');
+                if (!k1 || k1 > rb) break;
+                const char *k2 = strchr(k1 + 1, '"');
+                if (!k2 || k2 > rb) break;
+                size_t len = (size_t)(k2 - k1 - 1);
+                if (len > 0 && len < 32) {
+                    char key[32];
+                    memcpy(key, k1 + 1, len);
+                    key[len] = '\0';
+                    /* only assign keys this component actually declares */
+                    for (int i = 0; i < count; i++) {
+                        if (strcmp(params[i].key, key) == 0) {
+                            auto_cc_assign_one(inst, target, key, pool_idx);
+                            break;
+                        }
+                    }
+                }
+                q = k2 + 1;
+            }
+            p = rb;
+        }
+    }
+
+    /* Pass 2: everything the pages did not mention, declaration order. */
+    for (int i = 0; i < count; i++)
+        auto_cc_assign_one(inst, target, params[i].key, pool_idx);
+}
+
+/*
+ * Signature of the position parameter set. Cheap to compute and compare on
+ * every CC message; a change means the module was swapped or reloaded.
+ */
+static int auto_cc_signature(chain_instance_t *inst)
+{
+    int sig = inst->synth_param_count * 31 + inst->fx_count * 7 + inst->midi_fx_count * 3;
+    for (int i = 0; i < inst->fx_count && i < MAX_AUDIO_FX; i++)
+        sig += inst->fx_param_counts[i] * (i + 2);
+    for (int i = 0; i < inst->midi_fx_count && i < MAX_MIDI_FX; i++)
+        sig += inst->midi_fx_param_counts[i] * (i + 11);
+    /* knob bindings are skipped by the builder, so they belong in the signature */
+    sig += inst->knob_mapping_count * 101;
+    return sig;
+}
+
+/*
+ * Rebuild the derived auto-CC table if the parameter signature moved.
+ * Order matches the audible chain: midi_fx, synth, then audio fx.
+ */
+CHAIN_INTERNAL void chain_auto_cc_refresh(chain_instance_t *inst, const char *synth_hier)
+{
+    if (!inst) return;
+    int sig = auto_cc_signature(inst);
+    if (sig == inst->auto_cc_sig && inst->auto_cc_count > 0) return;
+    inst->auto_cc_sig = sig;
+    inst->auto_cc_count = 0;
+
+    int pool_idx = 0;
+    char target[16];
+    for (int i = 0; i < inst->midi_fx_count && i < MAX_MIDI_FX; i++) {
+        snprintf(target, sizeof(target), "midi_fx%d", i);
+        auto_cc_add_component(inst, target, inst->midi_fx_params[i],
+                              inst->midi_fx_param_counts[i],
+                              inst->midi_fx_ui_hierarchy[i], &pool_idx);
+    }
+    auto_cc_add_component(inst, "synth", inst->synth_params,
+                          inst->synth_param_count, synth_hier, &pool_idx);
+    for (int i = 0; i < inst->fx_count && i < MAX_AUDIO_FX; i++) {
+        snprintf(target, sizeof(target), "fx%d", i);
+        auto_cc_add_component(inst, target, inst->fx_params[i],
+                              inst->fx_param_counts[i],
+                              inst->fx_ui_hierarchy[i], &pool_idx);
+    }
+
+    /*
+     * Log the whole assignment. Without this the map is invisible: a user has
+     * no way to learn which CC reaches which parameter except by turning each
+     * one and listening, and the auto path deliberately does not move the
+     * on-screen knob (it sets the parameter directly), so there is nothing to
+     * watch either. Load-time only, so it costs one burst per module load.
+     */
+    {
+        char line[160];
+        int total = inst->synth_param_count;
+        for (int i = 0; i < inst->fx_count && i < MAX_AUDIO_FX; i++) total += inst->fx_param_counts[i];
+        for (int i = 0; i < inst->midi_fx_count && i < MAX_MIDI_FX; i++) total += inst->midi_fx_param_counts[i];
+        snprintf(line, sizeof(line),
+                 "auto-cc: %d assignments for %d params (pool %d)%s",
+                 inst->auto_cc_count, total, auto_cc_pool_size(inst),
+                 (inst->auto_cc_count < total) ? "  ** POOL EXHAUSTED **" : "");
+        v2_chain_log(inst, line);
+        for (int i = 0; i < inst->auto_cc_count; i++) {
+            snprintf(line, sizeof(line), "auto-cc:   CC %3u -> %s:%s",
+                     (unsigned)inst->auto_cc[i].cc,
+                     inst->auto_cc[i].target, inst->auto_cc[i].param);
+            v2_chain_log(inst, line);
+        }
+    }
+}
+
+/* Look up an auto-assigned CC. Returns NULL when the CC is not assigned. */
+CHAIN_INTERNAL auto_cc_t *chain_auto_cc_find(chain_instance_t *inst, uint8_t cc)
+{
+    if (!inst) return NULL;
+    /* Read-only on this path. The table is built at module load
+     * (chain_host.c); rebuilding here would drag a ~1 MB stack frame onto the
+     * audio thread via chain_mod_refresh_target_param_cache. */
+    for (int i = 0; i < inst->auto_cc_count; i++)
+        if (inst->auto_cc[i].cc == cc) return &inst->auto_cc[i];
+    return NULL;
+}
+
 chain_param_info_t *knob_find_param(chain_instance_t *inst, const char *target, const char *param) {
     if (!inst || !target) return NULL;
     if (strcmp(target, "synth") == 0)
@@ -986,6 +1215,73 @@ static int knob_value_to_cc(float val, const chain_param_info_t *pinfo) {
     if (cc_val < 0) cc_val = 0;
     if (cc_val > 127) cc_val = 127;
     return cc_val;
+}
+
+
+/*
+ * Echo an auto-mapped parameter back out as CC.
+ *
+ * This is what makes controller LEARN work: the user arms learn on the
+ * controller, moves the pot on Move for the parameter they want, and the
+ * controller sees the CC that drives it. Nothing else tells an external
+ * surface which address belongs to which knob -- without this the map exists
+ * only in a log file.
+ *
+ * Same shape as knob_emit_cc_out: slot receive channel, cable 2, change
+ * detection at CC resolution, and last_cc_out recorded ONLY on a successful
+ * send so a mailbox drop retries instead of leaving the surface stale.
+ */
+CHAIN_INTERNAL void auto_cc_emit(chain_instance_t *inst, const char *target,
+                                 const char *param, const char *val_str)
+{
+    static int dbg_n = 0;
+    int dbg = (dbg_n++ < 12);
+    char dl[160];
+    if (!inst) return;
+    if (!inst->cc_control) { if (dbg) v2_chain_log(inst, "auto-cc emit: cc_control off"); return; }
+    if (!inst->host || !inst->host->midi_send_external) {
+        if (dbg) v2_chain_log(inst, "auto-cc emit: no midi_send_external"); return; }
+    if (!inst->host->slot_recv_channel) {
+        if (dbg) v2_chain_log(inst, "auto-cc emit: no slot_recv_channel"); return; }
+    int recv_ch = inst->host->slot_recv_channel((void *)inst);
+    if (recv_ch < 0 || recv_ch > 15) {
+        if (dbg) { snprintf(dl, sizeof(dl), "auto-cc emit: recv_ch=%d rejected", recv_ch);
+                   v2_chain_log(inst, dl); } return; }
+
+    for (int i = 0; i < inst->auto_cc_count; i++) {
+        auto_cc_t *a = &inst->auto_cc[i];
+        if (strcmp(a->target, target) != 0 || strcmp(a->param, param) != 0) continue;
+
+        chain_param_info_t *pinfo = knob_find_param(inst, target, param);
+        if (dbg) { snprintf(dl, sizeof(dl), "auto-cc emit: hit %s:%s cc=%u val=%s pinfo=%s",
+                            target, param, (unsigned)a->cc, val_str ? val_str : "(null)",
+                            pinfo ? "y" : "n"); v2_chain_log(inst, dl); }
+        if (!pinfo || !val_str) return;
+        /* The value the caller just wrote -- no read-back needed, and a read on
+         * this path would cost ~2.8ms against a 1.68ms page render. */
+        float cur = (float)atof(val_str);
+
+        float span = pinfo->max_val - pinfo->min_val;
+        int cc_val = (span > 0.0f)
+            ? (int)(((cur - pinfo->min_val) / span) * 127.0f + 0.5f) : 0;
+        if (cc_val < 0) cc_val = 0;
+        if (cc_val > 127) cc_val = 127;
+        if (cc_val == a->last_cc_out) return;
+
+        const uint8_t msg[4] = {
+            (uint8_t)((2 << 4) | 0x0B),
+            (uint8_t)(0xB0 | (uint8_t)recv_ch),
+            a->cc,
+            (uint8_t)cc_val
+        };
+        int rc = inst->host->midi_send_external(msg, 4);
+        if (dbg) { snprintf(dl, sizeof(dl), "auto-cc emit: send cc=%u val=%d rc=%d",
+                            (unsigned)a->cc, cc_val, rc); v2_chain_log(inst, dl); }
+        if (rc > 0) a->last_cc_out = cc_val;
+        return;
+    }
+    if (dbg) { snprintf(dl, sizeof(dl), "auto-cc emit: NO MAPPING for %s:%s (count=%d)",
+                        target, param, inst->auto_cc_count); v2_chain_log(inst, dl); }
 }
 
 void knob_emit_cc_out(chain_instance_t *inst, int idx) {

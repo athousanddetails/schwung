@@ -1231,31 +1231,60 @@ static int knob_value_to_cc(float val, const chain_param_info_t *pinfo) {
  * detection at CC resolution, and last_cc_out recorded ONLY on a successful
  * send so a mailbox drop retries instead of leaving the surface stale.
  */
+/*
+ * Per-component CC gate.
+ *
+ * A slot is a chain of parts from different authors -- midi_fx, synth, fx1..3 --
+ * and wanting CC on the synth while keeping it off the FX (or the reverse) is
+ * the normal case, not an edge one. cc_component_mask carries one bit per
+ * component; the table itself is NOT rebuilt when a bit changes, so addresses
+ * stay put and a component switched back on has the CCs it had before.
+ *
+ * bit 0        synth
+ * bits 1..8    fx0..fx7
+ * bits 9..12   midi_fx0..midi_fx3
+ */
+CHAIN_INTERNAL int chain_cc_component_bit(const char *target)
+{
+    if (!target) return -1;
+    if (strcmp(target, "synth") == 0) return 0;
+    if (strncmp(target, "midi_fx", 7) == 0) {
+        int i = atoi(target + 7);
+        if (i >= 0 && i < MAX_MIDI_FX) return 9 + i;
+        return -1;
+    }
+    if (strncmp(target, "fx", 2) == 0) {
+        int i = atoi(target + 2);
+        if (i >= 0 && i < MAX_AUDIO_FX) return 1 + i;
+        return -1;
+    }
+    return -1;
+}
+
+CHAIN_INTERNAL int chain_cc_component_enabled(chain_instance_t *inst, const char *target)
+{
+    if (!inst) return 0;
+    int bit = chain_cc_component_bit(target);
+    if (bit < 0) return 1;   /* unknown component: do not silently mute it */
+    return (inst->cc_component_mask & (1u << bit)) ? 1 : 0;
+}
+
+
 CHAIN_INTERNAL void auto_cc_emit(chain_instance_t *inst, const char *target,
                                  const char *param, const char *val_str)
 {
-    static int dbg_n = 0;
-    int dbg = (dbg_n++ < 12);
-    char dl[160];
-    if (!inst) return;
-    if (!inst->cc_control) { if (dbg) v2_chain_log(inst, "auto-cc emit: cc_control off"); return; }
-    if (!inst->host || !inst->host->midi_send_external) {
-        if (dbg) v2_chain_log(inst, "auto-cc emit: no midi_send_external"); return; }
-    if (!inst->host->slot_recv_channel) {
-        if (dbg) v2_chain_log(inst, "auto-cc emit: no slot_recv_channel"); return; }
+    if (!inst || !inst->cc_control) return;
+    if (!chain_cc_component_enabled(inst, target)) return;
+    if (!inst->host || !inst->host->midi_send_external) return;
+    if (!inst->host->slot_recv_channel) return;
     int recv_ch = inst->host->slot_recv_channel((void *)inst);
-    if (recv_ch < 0 || recv_ch > 15) {
-        if (dbg) { snprintf(dl, sizeof(dl), "auto-cc emit: recv_ch=%d rejected", recv_ch);
-                   v2_chain_log(inst, dl); } return; }
+    if (recv_ch < 0 || recv_ch > 15) return;
 
     for (int i = 0; i < inst->auto_cc_count; i++) {
         auto_cc_t *a = &inst->auto_cc[i];
         if (strcmp(a->target, target) != 0 || strcmp(a->param, param) != 0) continue;
 
         chain_param_info_t *pinfo = knob_find_param(inst, target, param);
-        if (dbg) { snprintf(dl, sizeof(dl), "auto-cc emit: hit %s:%s cc=%u val=%s pinfo=%s",
-                            target, param, (unsigned)a->cc, val_str ? val_str : "(null)",
-                            pinfo ? "y" : "n"); v2_chain_log(inst, dl); }
         if (!pinfo || !val_str) return;
         /* The value the caller just wrote -- no read-back needed, and a read on
          * this path would cost ~2.8ms against a 1.68ms page render. */
@@ -1274,14 +1303,9 @@ CHAIN_INTERNAL void auto_cc_emit(chain_instance_t *inst, const char *target,
             a->cc,
             (uint8_t)cc_val
         };
-        int rc = inst->host->midi_send_external(msg, 4);
-        if (dbg) { snprintf(dl, sizeof(dl), "auto-cc emit: send cc=%u val=%d rc=%d",
-                            (unsigned)a->cc, cc_val, rc); v2_chain_log(inst, dl); }
-        if (rc > 0) a->last_cc_out = cc_val;
+        if (inst->host->midi_send_external(msg, 4) > 0) a->last_cc_out = cc_val;
         return;
     }
-    if (dbg) { snprintf(dl, sizeof(dl), "auto-cc emit: NO MAPPING for %s:%s (count=%d)",
-                        target, param, inst->auto_cc_count); v2_chain_log(inst, dl); }
 }
 
 void knob_emit_cc_out(chain_instance_t *inst, int idx) {

@@ -910,7 +910,7 @@ void v2_on_midi(void *instance, const uint8_t *msg, int len, int source) {
          */
         if (inst->cc_control) {
             auto_cc_t *a = chain_auto_cc_find(inst, cc);
-            if (a) {
+            if (a && chain_cc_component_enabled(inst, a->target)) {
                 chain_param_info_t *pinfo = knob_find_param(inst, a->target, a->param);
                 if (!pinfo) return;   /* assigned but unresolvable: consume, do not forward */
 

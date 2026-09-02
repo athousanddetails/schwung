@@ -238,6 +238,7 @@ typedef struct {
     int forward_channel;   /* PATCH_CHANNEL_UNSET=absent, -2=passthrough, -1=auto, 0-15=channel */
     int midi_fx_pre_mode;  /* 0 = Post (default), 1 = Pre (additive inject to Move MIDI_IN) */
     int cc_control;        /* 1 = auto-CC in/out for this slot (default on) */
+    unsigned cc_component_mask; /* per-component gate; default all bits set */
     int knob_cc_out;       /* 0 = off (default), 1 = echo chain-knob changes out
                             * as CC 102-109 on the slot's recv channel */
     lfo_state_t lfos[LFO_COUNT];  /* LFO configuration */
@@ -347,6 +348,8 @@ typedef struct chain_instance {
      * out for controller learn; 0 = off. Default on. Persisted per patch, so a
      * slot can take notes without its parameters being moved by stray CC. */
     int cc_control;
+    /* One bit per component (see chain_cc_component_bit). All on by default. */
+    unsigned cc_component_mask;
 
     /* Runtime modulation bus state */
     mod_target_state_t mod_targets[MAX_MOD_TARGETS];
@@ -589,6 +592,8 @@ CHAIN_INTERNAL int format_param_value(chain_param_info_t *param, float value, ch
 CHAIN_INTERNAL int is_smoothable_float(const char *val, float *out_value);
 CHAIN_INTERNAL chain_param_info_t *knob_find_param(chain_instance_t *inst, const char *target, const char *param);
 CHAIN_INTERNAL void chain_auto_cc_refresh(chain_instance_t *inst, const char *synth_hier);
+CHAIN_INTERNAL int chain_cc_component_bit(const char *target);
+CHAIN_INTERNAL int chain_cc_component_enabled(chain_instance_t *inst, const char *target);
 CHAIN_INTERNAL void auto_cc_emit(chain_instance_t *inst, const char *target,
                                  const char *param, const char *val_str);
 CHAIN_INTERNAL auto_cc_t *chain_auto_cc_find(chain_instance_t *inst, uint8_t cc);

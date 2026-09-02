@@ -168,6 +168,7 @@ void v2_unload_synth(chain_instance_t *inst) {
     inst->current_synth_module[0] = '\0';
     inst->synth_param_count = 0;
     inst->cc_control = 1;   /* auto-CC on by default; a patch may turn it off */
+    inst->cc_component_mask = 0xFFFFFFFFu;   /* every component on */
     inst->mod_param_refresh_ms_synth = 0;
     inst->synth_default_forward_channel = -1;
     inst->synth_bypassed = 0;
@@ -921,6 +922,7 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
             inst->midi_fx_pre_mode = temp_patch.midi_fx_pre_mode ? 1 : 0;
             inst->knob_cc_out = temp_patch.knob_cc_out ? 1 : 0;
             inst->cc_control  = temp_patch.cc_control ? 1 : 0;
+            inst->cc_component_mask = temp_patch.cc_component_mask;
             knob_emit_cc_out_all(inst);
             /* Check for "modified" field to restore dirty state */
             FILE *mf = fopen(val, "r");
@@ -987,6 +989,17 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
     else if (strcmp(key, "cc_control") == 0) {
         inst->cc_control = (val && (val[0] == '1' || val[0] == 't')) ? 1 : 0;
         inst->dirty = 1;
+        return;
+    }
+    else if (strncmp(key, "cc_control:", 11) == 0) {
+        /* Per-component: "cc_control:synth", "cc_control:fx1", ... */
+        int bit = chain_cc_component_bit(key + 11);
+        if (bit >= 0) {
+            int on = (val && (val[0] == '1' || val[0] == 't')) ? 1 : 0;
+            if (on) inst->cc_component_mask |=  (1u << bit);
+            else    inst->cc_component_mask &= ~(1u << bit);
+            inst->dirty = 1;
+        }
         return;
     }
     else if (strcmp(key, "knob_cc_out") == 0) {
@@ -1458,6 +1471,10 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     }
     if (strcmp(key, "cc_control") == 0) {
         return snprintf(buf, buf_len, "%d", inst->cc_control ? 1 : 0);
+    }
+    if (strncmp(key, "cc_control:", 11) == 0) {
+        return snprintf(buf, buf_len, "%d",
+                        chain_cc_component_enabled(inst, key + 11) ? 1 : 0);
     }
     if (strcmp(key, "knob_cc_out") == 0) {
         return snprintf(buf, buf_len, "%d", inst->knob_cc_out ? 1 : 0);

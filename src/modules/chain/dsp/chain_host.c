@@ -1694,6 +1694,10 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         int ch = -1;
         if (inst->host && inst->host->slot_recv_channel)
             ch = inst->host->slot_recv_channel((void *)inst);
+        /* -1 means the slot receives on ALL channels. Reported as 0 so the page
+         * can say so: "Ch 0" is not a channel, and ch+1 would have printed
+         * exactly that. */
+        ch = (ch < 0) ? -1 : ch;
         char t[16];
         for (int i = 0; i < inst->midi_fx_count && i < MAX_MIDI_FX; i++) {
             if (!inst->current_midi_fx_modules[i][0]) continue;

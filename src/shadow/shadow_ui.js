@@ -8208,6 +8208,10 @@ function getSlotStateWithRetry(slotIndex, key, retries) {
  * Note: save_patch expects raw chain content (synth, audio_fx at root)
  * with "custom_name" for the name. It wraps it with name/version/chain.
  */
+/* Per-slot, per-boot memory of the CC assignments seen on disk. Undefined
+ * means "not looked yet"; "" means looked and there were none. */
+let ccOverridesSeen = [];
+
 function buildSlotPatchJson(slotIndex, name, forAutosave, moduleChanged) {
     const cfg = chainConfigs[slotIndex];
     if (!cfg) return null;
@@ -8335,8 +8339,41 @@ function buildSlotPatchJson(slotIndex, name, forAutosave, moduleChanged) {
      * so patches written before this keep working. */
     const ccControl = getSlotParam(slotIndex, "cc_control");
     if (ccControl !== null) patch.cc_control = parseInt(ccControl) ? 1 : 0;
+    /*
+     * CC assignments, with the same protection the empty-slot branch gives a
+     * chain: never let an empty live map overwrite a saved one.
+     *
+     * Observed twice on device: a restore that does not happen leaves the map
+     * empty, the next autosave faithfully writes that empty map over the file,
+     * and the user\'s assignments are gone with no way back. Autosave is not
+     * the place to find out the restore failed.
+     *
+     * The disk is read ONCE per slot per boot, not per autosave -- reads are
+     * what this function is otherwise careful to avoid.
+     */
     const ccOverrides = getSlotParam(slotIndex, "cc_overrides");
-    if (ccOverrides) patch.cc_overrides = ccOverrides;
+    if (ccOverrides) {
+        patch.cc_overrides = ccOverrides;
+        ccOverridesSeen[slotIndex] = ccOverrides;
+    } else {
+        if (ccOverridesSeen[slotIndex] === undefined && activeSlotStateDir) {
+            let onDisk = "";
+            try {
+                const raw = host_read_file(activeSlotStateDir + "/slot_" + slotIndex + ".json");
+                if (raw) {
+                    const prev = JSON.parse(raw);
+                    onDisk = (prev && prev.chain && prev.chain.cc_overrides) || "";
+                }
+            } catch (e) { /* malformed or missing: nothing to preserve */ }
+            ccOverridesSeen[slotIndex] = onDisk;
+        }
+        const keep = ccOverridesSeen[slotIndex];
+        if (keep) {
+            patch.cc_overrides = keep;
+            debugLog("autosave: slot " + slotIndex + " reports no CC assignments but " +
+                     "slot_" + slotIndex + ".json has some — preserving");
+        }
+    }
     const ccMask = getSlotParam(slotIndex, "cc_component_mask");
     if (ccMask !== null && ccMask !== "") {
         const m = parseInt(ccMask, 10);
@@ -12080,7 +12117,12 @@ function handleCcCardMidi(data) {
         if (!delta) return true;
         /* -1 sits below 0 and is reachable, so a number can be taken back:
          * a map with no way to un-assign fills with numbers nobody wants. */
-        let next = ccCardCc + (delta > 0 ? 1 : -1);
+        const reserved = (n) => (n >= 71 && n <= 78) || (n >= 102 && n <= 109);
+        const dir = delta > 0 ? 1 : -1;
+        let next = ccCardCc + dir;
+        /* Step OVER the chain-knob ranges rather than stopping on them: the
+         * assign would be refused and the number would sit there looking set. */
+        while (reserved(next)) next += dir;
         if (next < -1) next = -1;
         if (next > 127) next = 127;
         if (next !== ccCardCc) {
@@ -12099,6 +12141,12 @@ function handleCcCardMidi(data) {
 /* While learning, the DSP is the one that changes the value, so read it back
  * until it moves. One read, only while the card is up and only while armed. */
 function ccCardPoll() {
+    /*
+     * Left the card by some route other than Back -- a view change, a jump, a
+     * module reload. Learn must not stay armed: the next CC from the surface
+     * would land on a parameter the user is no longer looking at.
+     */
+    if (ccCardOpen && view !== VIEWS.PARAM_PAGES) { closeCcCard(); return; }
     if (!ccCardOpen || !ccCardLearning) return;
     const cur = getSlotParam(ccCardSlot, "cc_idx:" + ccCardIndex);
     const v = cur === null ? null : parseInt(cur, 10);
@@ -12125,13 +12173,6 @@ function runChainSettingAction(slot, key) {
         const bar = rest.indexOf("|");
         const idx = parseInt(bar >= 0 ? rest.slice(0, bar) : rest, 10);
         if (!isNaN(idx)) openCcCard(slot, idx, bar >= 0 ? rest.slice(bar + 1) : "");
-        return;
-    }
-    if (key && key.indexOf("cc_learn_first:") === 0) {
-        /* A component with no address yet: learn onto its FIRST parameter, so
-         * there is something to take a number with. */
-        setSlotParam(slot, "cc_learn", key.slice(15) + "|");
-        needsRedraw = true;
         return;
     }
     if (key === "knobs") {

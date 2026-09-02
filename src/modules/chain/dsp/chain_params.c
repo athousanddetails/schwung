@@ -1412,6 +1412,17 @@ CHAIN_INTERNAL int chain_cc_assign(chain_instance_t *inst, const char *target,
         return -1;
     }
     if (cc > 127) return -1;
+    /*
+     * 71-78 and 102-109 belong to the chain knobs and are refused.
+     *
+     * Both blocks run BEFORE the map in chain_midi.c, so a parameter assigned
+     * there is reached only while the slot happens to have no knob mappings --
+     * assign one later and the mapping silently stops working. A number that
+     * works until something unrelated changes is worse than one you cannot
+     * pick, so it cannot be picked. Sixteen of 128 addresses; the jog steps
+     * over them.
+     */
+    if ((cc >= 71 && cc <= 78) || (cc >= 102 && cc <= 109)) return -1;
 
     auto_cc_t *mine = NULL, *theirs = NULL;
     for (int i = 0; i < inst->auto_cc_count; i++) {
@@ -1521,6 +1532,20 @@ CHAIN_INTERNAL void chain_cc_parse_overrides(chain_instance_t *inst, const char 
         o->cc = (uint8_t)atoi(b2 + 1);
     }
     chain_cc_apply_overrides(inst);
+    {
+        /* Logged HERE, not in the rebuild: the rebuild runs at module load and
+         * the replay happens afterwards on the load_file path, so the summary
+         * printed there always reads "0 assigned" no matter what was restored
+         * -- a status line that cannot show the thing it is about, which reads
+         * as the restore having failed. */
+        int assigned = 0;
+        for (int k = 0; k < inst->auto_cc_count; k++)
+            if (inst->auto_cc[k].cc != CC_NONE) assigned++;
+        char line[96];
+        snprintf(line, sizeof(line), "cc-map: restored %d, %d now assigned",
+                 inst->cc_override_count, assigned);
+        v2_chain_log(inst, line);
+    }
 }
 
 

@@ -342,6 +342,29 @@ int v2_load_midi_fx_slot(chain_instance_t *inst, int slot, const char *fx_name) 
         inst->midi_fx_count = slot + 1;
     }
 
+    /*
+     * Params and layout from the DSP when module.json declares none -- the
+     * third component kind needing the same fallback the synth and audio FX
+     * got. Without it a MIDI FX shows in the CC Map with nothing to assign and
+     * no page names, which reads as the map being broken for that module.
+     *
+     * After midi_fx_count, because the refresh rejects a slot at or beyond it.
+     */
+    if (inst->midi_fx_param_counts[slot] <= 0) {
+        char t[16];
+        snprintf(t, sizeof(t), "midi_fx%d", slot + 1);
+        chain_mod_refresh_target_param_cache(inst, t);
+    }
+    if (inst->midi_fx_ui_hierarchy[slot] && !inst->midi_fx_ui_hierarchy[slot][0] &&
+        api && api->get_param && inst->midi_fx_instances[slot]) {
+        if (api->get_param(inst->midi_fx_instances[slot], "ui_pages", inst->midi_fx_ui_hierarchy[slot],
+                           CHAIN_UI_HIERARCHY_LEN) <= 0) {
+            api->get_param(inst->midi_fx_instances[slot], "ui_hierarchy", inst->midi_fx_ui_hierarchy[slot],
+                           CHAIN_UI_HIERARCHY_LEN);
+        }
+    }
+    chain_auto_cc_refresh(inst, NULL);
+
     snprintf(msg, sizeof(msg), "MIDI FX loaded: %s (slot %d)", fx_name, slot);
     v2_chain_log(inst, msg);
     return 0;

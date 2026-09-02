@@ -377,6 +377,7 @@ export function ccComponents(raw) {
     for (const r of String(raw || "").split(";").filter(Boolean)) {
         const b = r.split("|");
         if (b.length < 4) continue;
+        /* 0 = the slot receives on ALL channels (the DSP reports -1, +1'd). */
         out.push({ target: b[0], module: b[1], ch: parseInt(b[2], 10) || 0,
                    on: b[3] === "1" });
     }
@@ -418,7 +419,7 @@ export function ccMapLevels(mapRaw, compRaw) {
         const n = rows.filter((r) => r.target === c.target).length;
         return {
             label: c.module,
-            value: (c.on ? ("Ch " + c.ch) : "OFF") + "  " + n,
+            value: (c.on ? (c.ch > 0 ? ("Ch " + c.ch) : "All") : "OFF") + "  " + n,
             level: "ccmap_" + c.target,
         };
     });
@@ -462,14 +463,16 @@ export function ccMapLevels(mapRaw, compRaw) {
                        * meaningful once there IS a number. */
                       value: (parseInt(r.cc, 10) < 0)
                           ? "--"
-                          : (r.cc + " Ch" + c.ch),
+                          : (r.cc + (c.ch > 0 ? (" Ch" + c.ch) : " All")),
                       /* index AND label: the card shows the parameter name,
                        * and a read to fetch it would cost ~2.8ms on a click. */
                       action: "cc_edit:" + r.index + "|" + r.label,
                   }))
-                : [{ label: "No CC free - learn one",
-                     action: "cc_learn_first:" + c.target }],
-            menu_label: c.module + " Ch " + c.ch,
+                /* Every parameter is listed now, assigned or not, so an
+                 * empty list means the module declares none -- not that the
+                 * numbers ran out. No action: there is nothing to assign. */
+                : [{ label: "No parameters", action: "" }],
+            menu_label: c.module + (c.ch > 0 ? (" Ch " + c.ch) : " All"),
         };
     }
     return levels;

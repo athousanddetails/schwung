@@ -175,6 +175,7 @@ void v2_unload_synth(chain_instance_t *inst) {
     inst->synth_param_count = 0;
     inst->cc_control = 1;   /* auto-CC on by default; a patch may turn it off */
     inst->cc_component_mask = 0xFFFFFFFFu;   /* every component on */
+    inst->cc_learn_reject = -1;
     inst->mod_param_refresh_ms_synth = 0;
     inst->synth_default_forward_channel = -1;
     inst->synth_bypassed = 0;
@@ -1655,6 +1656,11 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         if (i < 0 || i >= inst->auto_cc_count) return snprintf(buf, buf_len, "%s", "");
         if (inst->auto_cc[i].cc == CC_NONE) return snprintf(buf, buf_len, "%s", "-1");
         return snprintf(buf, buf_len, "%u", (unsigned)inst->auto_cc[i].cc);
+    }
+    if (strcmp(key, "cc_learn_reject") == 0) {
+        int r = inst->cc_learn_reject;
+        inst->cc_learn_reject = -1;      /* read once: it is an event */
+        return snprintf(buf, buf_len, "%d", r);
     }
     if (strcmp(key, "cc_learn") == 0) {
         /* "target|param" while armed, empty otherwise. Readable so the UI can

@@ -400,6 +400,9 @@ typedef struct chain_instance {
      * parameter instead of moving anything. Empty target = not learning. */
     char cc_learn_target[16];
     char cc_learn_param[32];
+    /* The last reserved CC a learn refused, so the card can say which number
+     * and why. -1 = nothing to report; cleared when read. */
+    int cc_learn_reject;
 
     /* 1 = this slot responds to auto-assigned CC and echoes param changes back
      * out for controller learn; 0 = off. Default on. Persisted per patch, so a
@@ -652,6 +655,7 @@ CHAIN_INTERNAL void chain_auto_cc_refresh(chain_instance_t *inst, const char *sy
 CHAIN_INTERNAL int chain_cc_component_bit(const char *target);
 CHAIN_INTERNAL int chain_cc_component_enabled(chain_instance_t *inst, const char *target);
 CHAIN_INTERNAL const char *chain_cc_first_param(chain_instance_t *inst, const char *target);
+CHAIN_INTERNAL int chain_cc_reserved(int cc);
 CHAIN_INTERNAL int chain_cc_assign(chain_instance_t *inst, const char *target,
                                    const char *param, int cc);
 CHAIN_INTERNAL void chain_cc_apply_overrides(chain_instance_t *inst);

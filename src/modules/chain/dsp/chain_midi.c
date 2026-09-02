@@ -939,6 +939,13 @@ void v2_on_midi(void *instance, const uint8_t *msg, int len, int source) {
          * moving that parameter on the way past would be a surprise edit.
          */
         if (inst->cc_control && inst->cc_learn_target[0]) {
+            if (chain_cc_reserved((int)cc)) {
+                /* Stay armed and report the number: refusing in silence looks
+                 * exactly like the controller not being heard, which is the
+                 * failure this whole path exists to make visible. */
+                inst->cc_learn_reject = (int)cc;
+                return;
+            }
             chain_cc_assign(inst, inst->cc_learn_target, inst->cc_learn_param, (int)cc);
             inst->cc_learn_target[0] = '\0';
             inst->cc_learn_param[0] = '\0';

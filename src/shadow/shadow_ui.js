@@ -12032,12 +12032,26 @@ let ccCardIndex = -1;
 let ccCardName = "";
 let ccCardCc = 0;
 let ccCardLearning = false;
+let ccCardNotice = "";        /* transient line, e.g. a refused CC */
+let ccCardNoticeUntil = 0;
+
+/*
+ * Numbers a parameter may not be given -- must match chain_cc_reserved.
+ *   0, 32     bank select MSB/LSB, a 14-bit pair rather than a control
+ *   71-78     Move own chain knobs (relative)
+ *   102-109   the same eight, absolute
+ */
+function ccReserved(n) {
+    return n === 0 || n === 32 ||
+           (n >= 71 && n <= 78) || (n >= 102 && n <= 109);
+}
 
 function openCcCard(slot, index, name) {
     ccCardSlot = slot;
     ccCardIndex = index;
     ccCardName = name || "";
     ccCardLearning = false;
+    ccCardNotice = "";
     const cur = getSlotParam(slot, "cc_idx:" + index);
     const parsed = cur === null ? NaN : parseInt(cur, 10);
     ccCardCc = isNaN(parsed) ? -1 : parsed;   /* -1 = no number yet */
@@ -12089,7 +12103,11 @@ function drawCcCard() {
         print(bx, y + 19, b, 1);
     }
 
-    const hint = ccCardLearning ? "BACK cancel" : "JOG set  CLK learn  BACK out";
+    let hint = ccCardLearning ? "BACK cancel" : "JOG set  CLK learn  BACK out";
+    /* A refusal outranks the hint: the user just did something and needs to
+     * know it did not take, and why. */
+    if (ccCardNotice && Date.now() < ccCardNoticeUntil) hint = ccCardNotice;
+    else if (ccCardNotice) ccCardNotice = "";
     print(x + Math.max(2, ((w - text_width(hint)) >> 1)), y + h - 10, hint, 1);
 }
 
@@ -12117,12 +12135,11 @@ function handleCcCardMidi(data) {
         if (!delta) return true;
         /* -1 sits below 0 and is reachable, so a number can be taken back:
          * a map with no way to un-assign fills with numbers nobody wants. */
-        const reserved = (n) => (n >= 71 && n <= 78) || (n >= 102 && n <= 109);
         const dir = delta > 0 ? 1 : -1;
         let next = ccCardCc + dir;
         /* Step OVER the chain-knob ranges rather than stopping on them: the
          * assign would be refused and the number would sit there looking set. */
-        while (reserved(next)) next += dir;
+        while (ccReserved(next)) next += dir;
         if (next < -1) next = -1;
         if (next > 127) next = 127;
         if (next !== ccCardCc) {
@@ -12148,6 +12165,16 @@ function ccCardPoll() {
      */
     if (ccCardOpen && view !== VIEWS.PARAM_PAGES) { closeCcCard(); return; }
     if (!ccCardOpen || !ccCardLearning) return;
+
+    /* Did the DSP refuse a reserved number? Read once -- it is an event. */
+    const rej = getSlotParam(ccCardSlot, "cc_learn_reject");
+    const rejN = rej === null ? -1 : parseInt(rej, 10);
+    if (!isNaN(rejN) && rejN >= 0) {
+        ccCardNotice = "CC " + rejN + " RESERVED";
+        ccCardNoticeUntil = Date.now() + 2000;
+        needsRedraw = true;
+    }
+
     const cur = getSlotParam(ccCardSlot, "cc_idx:" + ccCardIndex);
     const v = cur === null ? null : parseInt(cur, 10);
     if (v !== null && !isNaN(v) && v !== ccCardCc) {

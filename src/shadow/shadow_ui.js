@@ -263,6 +263,7 @@ import {
 import {
     paramPagesEnabled, enterParamPages, exitParamPages, paramPagesActive,
     tickParamPages, drawParamPages, handleParamPagesMidi, currentParamPage,
+    paramPagesContractChanged,
     paramPagesComponent, paramPagesSlot, paramPagesChildIndex, clearParamPagesTouch,
     enumPickerFooterHints, CONTRACT_SETTLE_MS, LAYOUT_LIST,
     paramPagesRefreshTrailing, paramPagesExitMenu, paramPagesRevalue
@@ -8334,6 +8335,8 @@ function buildSlotPatchJson(slotIndex, name, forAutosave, moduleChanged) {
      * so patches written before this keep working. */
     const ccControl = getSlotParam(slotIndex, "cc_control");
     if (ccControl !== null) patch.cc_control = parseInt(ccControl) ? 1 : 0;
+    const ccOverrides = getSlotParam(slotIndex, "cc_overrides");
+    if (ccOverrides) patch.cc_overrides = ccOverrides;
     const ccMask = getSlotParam(slotIndex, "cc_component_mask");
     if (ccMask !== null && ccMask !== "") {
         const m = parseInt(ccMask, 10);
@@ -11968,7 +11971,169 @@ function applyComponentSelectionConfirmed(slotIndex, paramKey, moduleId, comp, c
  * step. Everything else it touches (pendingSaveName, confirmingOverwrite,
  * lfoCtx, ...) is module state it always mutated and still does.
  */
+
+/*
+ * THE CC CARD — an overlay over the CC Map list.
+ *
+ * A row that only showed a number gave the user nothing to do and no sign that
+ * a click had registered. This is the same shape as the knob card: a bordered
+ * panel over the list it belongs to, raised by a click and dropped by Back.
+ *
+ * Two gestures, no focus to manage:
+ *   JOG   changes the CC, live -- the number moves in front of you and the
+ *         assignment moves with it, swapping with whoever held it
+ *   CLICK arms LEARN -- turn any control on the surface and it claims this
+ *         parameter, which is the gesture the E16 already answers
+ *
+ * Drawn LAST and therefore fed FIRST (docs/SHADOW_UI.md): the grid's input
+ * early-out claims the jog, so an overlay added only to the draw path reads as
+ * a dead panel. That is the documented half-working-overlay bug.
+ */
+let ccCardOpen = false;
+let ccCardSlot = 0;
+let ccCardIndex = -1;
+let ccCardName = "";
+let ccCardCc = 0;
+let ccCardLearning = false;
+
+function openCcCard(slot, index, name) {
+    ccCardSlot = slot;
+    ccCardIndex = index;
+    ccCardName = name || "";
+    ccCardLearning = false;
+    const cur = getSlotParam(slot, "cc_idx:" + index);
+    const parsed = cur === null ? NaN : parseInt(cur, 10);
+    ccCardCc = isNaN(parsed) ? -1 : parsed;   /* -1 = no number yet */
+    ccCardOpen = true;
+    needsRedraw = true;
+}
+
+function closeCcCard() {
+    if (!ccCardOpen) return false;
+    ccCardOpen = false;
+    ccCardLearning = false;
+    /* Disarm: leaving the card must not leave a controller able to steal the
+     * next CC into a parameter the user is no longer looking at. */
+    setSlotParam(ccCardSlot, "cc_learn", "");
+    needsRedraw = true;
+    return true;
+}
+
+function ccCardOutline(x, y, w, h) {
+    fill_rect(x, y, w, 1, 1);
+    fill_rect(x, y + h - 1, w, 1, 1);
+    fill_rect(x, y, 1, h, 1);
+    fill_rect(x + w - 1, y, 1, h, 1);
+}
+
+function drawCcCard() {
+    if (!ccCardOpen) return;
+    const x = 6, y = 10, w = SCREEN_WIDTH - 12, h = 44;
+
+    /* Clear behind, then frame. The 1px gap matters for the same reason the
+     * knob card's does: border and content both draw white, so without it the
+     * panel reads as a stripe across the list. */
+    fill_rect(x - 1, y - 1, w + 2, h + 2, 0);
+    ccCardOutline(x, y, w, h);
+
+    const name = ccCardName.length > 18 ? ccCardName.slice(0, 18) : ccCardName;
+    print(x + 4, y + 3, name, 1);
+    fill_rect(x + 1, y + 13, w - 2, 1, 1);
+
+    if (ccCardLearning) {
+        const m = "TURN A CONTROL";
+        print(x + Math.max(2, ((w - text_width(m)) >> 1)), y + 19, m, 1);
+    } else {
+        const num = (ccCardCc < 0) ? "CC --" : ("CC " + ccCardCc);
+        print(x + 6, y + 19, num, 2);
+        const b = "LEARN";
+        const bx = x + w - text_width(b) - 10;
+        ccCardOutline(bx - 4, y + 17, text_width(b) + 8, 14);
+        print(bx, y + 19, b, 1);
+    }
+
+    const hint = ccCardLearning ? "BACK cancel" : "JOG set  CLK learn  BACK out";
+    print(x + Math.max(2, ((w - text_width(hint)) >> 1)), y + h - 10, hint, 1);
+}
+
+/* Input for the card. Returns true when it consumed the event. */
+function handleCcCardMidi(data) {
+    if (!ccCardOpen || !data || data.length < 3) return false;
+    if ((data[0] & 0xF0) !== 0xB0) return false;
+    const d1 = data[1], d2 = data[2];
+
+    if (d1 === 51) {                       /* BACK */
+        if (d2 > 0) closeCcCard();
+        return true;
+    }
+    if (d1 === 3) {                        /* jog CLICK */
+        if (d2 > 0) {
+            ccCardLearning = true;
+            setSlotParam(ccCardSlot, "cc_learn_idx:" + ccCardIndex, "1");
+            needsRedraw = true;
+        }
+        return true;
+    }
+    if (d1 === 14) {                       /* jog TURN */
+        if (ccCardLearning) return true;   /* waiting for the surface, not the jog */
+        const delta = (d2 < 64) ? d2 : d2 - 128;
+        if (!delta) return true;
+        /* -1 sits below 0 and is reachable, so a number can be taken back:
+         * a map with no way to un-assign fills with numbers nobody wants. */
+        let next = ccCardCc + (delta > 0 ? 1 : -1);
+        if (next < -1) next = -1;
+        if (next > 127) next = 127;
+        if (next !== ccCardCc) {
+            ccCardCc = next;
+            setSlotParam(ccCardSlot, "cc_idx:" + ccCardIndex, String(next));
+            /* The row behind the card carries this number in its label, so the
+             * grid has to re-read or the list keeps showing the old value. */
+            paramPagesContractChanged();
+            needsRedraw = true;
+        }
+        return true;
+    }
+    return false;
+}
+
+/* While learning, the DSP is the one that changes the value, so read it back
+ * until it moves. One read, only while the card is up and only while armed. */
+function ccCardPoll() {
+    if (!ccCardOpen || !ccCardLearning) return;
+    const cur = getSlotParam(ccCardSlot, "cc_idx:" + ccCardIndex);
+    const v = cur === null ? null : parseInt(cur, 10);
+    if (v !== null && !isNaN(v) && v !== ccCardCc) {
+        ccCardCc = v;
+        ccCardLearning = false;
+        paramPagesContractChanged();
+        needsRedraw = true;
+    }
+}
+
 function runChainSettingAction(slot, key) {
+    /*
+     * CC Map rows arm LEARN rather than opening an editor.
+     *
+     * A confirm/editor modal raised from the knob grid renders nowhere and
+     * cannot be answered -- the documented reason Save/Save As/Delete hand off
+     * to the list view. Learn needs neither: the user clicks the parameter,
+     * turns any control on their surface, and the CC that arrives claims it,
+     * swapping with whatever held it. The gesture is the confirmation.
+     */
+    if (key && key.indexOf("cc_edit:") === 0) {
+        const rest = key.slice(8);
+        const bar = rest.indexOf("|");
+        const idx = parseInt(bar >= 0 ? rest.slice(0, bar) : rest, 10);
+        if (!isNaN(idx)) openCcCard(slot, idx, bar >= 0 ? rest.slice(bar + 1) : "");
+        return;
+    }
+    if (key && key.indexOf("cc_learn_first:") === 0) {
+        /* A component with no address yet: learn onto its FIRST parameter, so
+         * there is something to take a number with. */
+        setSlotParam(slot, "cc_learn", key.slice(15) + "|");
+        needsRedraw = true;
+        return;
+    }
     if (key === "knobs") {
         enterKnobEditor(slot);
         return;
@@ -21450,6 +21615,7 @@ function dispatchCoRunDraw() {
          * list editor, which drawParamPages declines by returning false. */
         case VIEWS.PARAM_PAGES:
             if (!drawParamPages()) { if (enterHierarchyEditorFromParamPages()) drawHierarchyEditor(); }
+            drawCcCard();   /* over the list it belongs to */
             break;
         case VIEWS.CANVAS:               drawCanvasPreview(); break;
         case VIEWS.KNOB_EDITOR:          drawKnobEditor(); break;
@@ -21548,6 +21714,9 @@ globalThis.tick = function() {
      * new call is the wrong trade. */
     if (view === VIEWS.PARAM_PAGES) tickComponentWidgets();
     if (view === VIEWS.PARAM_PAGES) tickParamPages();
+    /* While the card is armed the DSP is what changes the value, so notice
+     * it. One read, only while armed -- never on the draw path. */
+    if (view === VIEWS.PARAM_PAGES) ccCardPoll();
     /* The debounced `*` refresh (see tickUserPresetStale's own note) — driven
      * from the tick, never from a draw function, and cheap to poll when
      * nothing is pending (one boolean test). */
@@ -22657,6 +22826,7 @@ globalThis.tick = function() {
          * which drawParamPages declines by returning false. */
         case VIEWS.PARAM_PAGES:
             if (!drawParamPages()) { if (enterHierarchyEditorFromParamPages()) drawHierarchyEditor(); }
+            drawCcCard();   /* over the list it belongs to */
             break;
         case VIEWS.CANVAS:
             drawCanvasPreview();
@@ -22932,6 +23102,9 @@ globalThis.onMidiMessageInternal = function(data) {
      * working, because decodeInput claims CC 14 but returns null for pads. */
     if (view === VIEWS.PARAM_PAGES && paramPagesActive() && !isTextEntryActive()) {
         if (maybeDismissWarningFromInput(status, d1, d2)) { needsRedraw = true; return; }
+        /* AHEAD of the grid: it claims the jog in its own early-out, so a card
+         * fed after it would draw correctly and answer nothing. */
+        if (handleCcCardMidi(data)) { needsRedraw = true; return; }
         if (handleParamPagesMidi(data)) { needsRedraw = true; return; }
     }
 

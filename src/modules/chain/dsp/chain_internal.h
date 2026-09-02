@@ -126,11 +126,51 @@ typedef struct {
  * Parameters already bound to one of the eight knobs are skipped, so a knob
  * and an auto CC never drive the same target from two addresses.
  */
-#define MAX_AUTO_CC 128
+/* Every CC-able parameter of the chain, assigned or not. 256 covers a synth
+ * plus a full FX chain; beyond that the tail is dropped and said so. */
+#define MAX_AUTO_CC 256
+/* cc value meaning "no number yet". Not 0: CC 0 is a real number (bank select
+ * MSB), and a sentinel a user can jog onto is a sentinel that stops meaning
+ * "unassigned". */
+#define CC_NONE 255
+
+/*
+ * A user reassignment of one parameter's CC.
+ *
+ * The derived map is rebuilt whenever the chain changes, so a reassignment
+ * cannot live in it -- it is replayed ON TOP after each rebuild. Keyed by
+ * target+param, never by position, so a module update that inserts a parameter
+ * does not silently move somebody's mapping onto a different control.
+ *
+ * Reassignment SWAPS: the parameter that held the wanted CC takes the one being
+ * given up. Nothing becomes unreachable, which matters because a chain can
+ * declare more parameters than there are usable CC numbers -- an FX behind a
+ * 97-parameter synth gets none at all, and swapping is how a user takes one.
+ */
+/*
+ * 32 was sized for "a few reassignments on top of an automatic map". Nothing is
+ * automatic any more -- every mapping a user makes is an override -- so the cap
+ * is now the number of parameters they can map at all, and silently dropping
+ * the 33rd would be a mapping that works until the next reload.
+ */
+/* You cannot map more parameters than the chain has, and MAX_AUTO_CC is that
+ * bound -- so this is not a policy limit a user can hit, it is the same number
+ * twice. */
+#define MAX_CC_OVERRIDES MAX_AUTO_CC
+typedef struct {
+    char target[16];
+    char param[32];
+    uint8_t cc;
+} cc_override_t;
 typedef struct {
     uint8_t cc;
     char target[16];     /* "synth", "fx0".., "midi_fx0".. */
     char param[32];
+    /* The layout page this parameter sits on ("Band 1", "Bass Drum"), taken
+     * from the module's own ui_pages/ui_hierarchy. Four parameters called
+     * "Gain" are indistinguishable without it. Empty when the module declares
+     * no layout. */
+    char group[20];
     int last_cc_out;     /* last value emitted, -1 = never; change detection at
                           * CC resolution so a slow sweep emits once per step */
 } auto_cc_t;
@@ -238,6 +278,15 @@ typedef struct {
     int forward_channel;   /* PATCH_CHANNEL_UNSET=absent, -2=passthrough, -1=auto, 0-15=channel */
     int midi_fx_pre_mode;  /* 0 = Post (default), 1 = Pre (additive inject to Move MIDI_IN) */
     int cc_control;        /* 1 = auto-CC in/out for this slot (default on) */
+    /*
+     * Saved assignments, verbatim ("target|param|cc;").
+     *
+     * HEAP, and sized to what was actually written: a fixed field would cap
+     * how many parameters a user may map, and a cap here is a mapping that
+     * works until the patch is reloaded and then silently is not there.
+     * Allocated in v2_parse_patch_file, freed with the patch array.
+     */
+    char *cc_overrides;
     unsigned cc_component_mask; /* per-component gate; default all bits set */
     int knob_cc_out;       /* 0 = off (default), 1 = echo chain-knob changes out
                             * as CC 102-109 on the slot's recv channel */
@@ -343,6 +392,14 @@ typedef struct chain_instance {
     auto_cc_t auto_cc[MAX_AUTO_CC];
     int auto_cc_count;
     int auto_cc_sig;
+
+    cc_override_t cc_overrides[MAX_CC_OVERRIDES];
+    int cc_override_count;
+
+    /* Armed by the UI: the next external CC on this slot claims this
+     * parameter instead of moving anything. Empty target = not learning. */
+    char cc_learn_target[16];
+    char cc_learn_param[32];
 
     /* 1 = this slot responds to auto-assigned CC and echoes param changes back
      * out for controller learn; 0 = off. Default on. Persisted per patch, so a
@@ -594,6 +651,11 @@ CHAIN_INTERNAL chain_param_info_t *knob_find_param(chain_instance_t *inst, const
 CHAIN_INTERNAL void chain_auto_cc_refresh(chain_instance_t *inst, const char *synth_hier);
 CHAIN_INTERNAL int chain_cc_component_bit(const char *target);
 CHAIN_INTERNAL int chain_cc_component_enabled(chain_instance_t *inst, const char *target);
+CHAIN_INTERNAL const char *chain_cc_first_param(chain_instance_t *inst, const char *target);
+CHAIN_INTERNAL int chain_cc_assign(chain_instance_t *inst, const char *target,
+                                   const char *param, int cc);
+CHAIN_INTERNAL void chain_cc_apply_overrides(chain_instance_t *inst);
+CHAIN_INTERNAL void chain_cc_parse_overrides(chain_instance_t *inst, const char *str);
 CHAIN_INTERNAL void auto_cc_emit(chain_instance_t *inst, const char *target,
                                  const char *param, const char *val_str);
 CHAIN_INTERNAL auto_cc_t *chain_auto_cc_find(chain_instance_t *inst, uint8_t cc);

@@ -908,6 +908,20 @@ void v2_on_midi(void *instance, const uint8_t *msg, int len, int source) {
          * its own output would fight the user mid-turn, the same reasoning the
          * absolute knob block records.
          */
+        /*
+         * LEARN: the UI armed a parameter, so the next external CC claims it.
+         *
+         * Ahead of the normal lookup, and it CONSUMES the message: the CC the
+         * user is teaching almost certainly already drives something else, and
+         * moving that parameter on the way past would be a surprise edit.
+         */
+        if (inst->cc_control && inst->cc_learn_target[0]) {
+            chain_cc_assign(inst, inst->cc_learn_target, inst->cc_learn_param, (int)cc);
+            inst->cc_learn_target[0] = '\0';
+            inst->cc_learn_param[0] = '\0';
+            return;
+        }
+
         if (inst->cc_control) {
             auto_cc_t *a = chain_auto_cc_find(inst, cc);
             if (a && chain_cc_component_enabled(inst, a->target)) {

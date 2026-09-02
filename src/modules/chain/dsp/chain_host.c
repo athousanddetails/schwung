@@ -118,6 +118,12 @@ static void v2_destroy_instance(void *instance) {
     v2_unload_synth(inst);
 
     chain_free_position_storage(inst);
+    /* Per-patch heap fields. The scan loop frees these when it reuses the
+     * array; destroying the instance is the other way out. */
+    for (int i = 0; i < MAX_PATCHES; i++) {
+        free(inst->patches[i].cc_overrides);
+        inst->patches[i].cc_overrides = NULL;
+    }
     free(inst);
 }
 
@@ -334,6 +340,7 @@ static int v2_load_audio_fx_slot(chain_instance_t *inst, int slot, const char *f
     parse_ui_hierarchy_cache(fx_dir, inst->fx_ui_hierarchy[slot], CHAIN_UI_HIERARCHY_LEN);
     inst->mod_param_refresh_ms_fx[slot] = 0;
 
+
     /* Read capabilities.requires_continuous_processing from module.json — stateful
      * FX (loopers, modulated delays) opt out of the shim's silence-skip so their
      * internal time advances even when audio I/O has been silent for >1s. */
@@ -368,6 +375,37 @@ static int v2_load_audio_fx_slot(chain_instance_t *inst, int slot, const char *f
     if (slot >= inst->fx_count) {
         inst->fx_count = slot + 1;
     }
+
+    /*
+     * AFTER fx_count, which is the whole point.
+     *
+     * chain_mod_refresh_target_param_cache rejects a slot at or beyond
+     * fx_count, so asking before the count includes this slot returns -1 and
+     * the parameter list stays empty -- the FX then shows in the CC Map with
+     * nothing to assign, exactly as if it had no parameters at all.
+     *
+     * The fallback itself is the synth's: module.json may declare no params
+     * because the module serves its contract from the DSP at runtime.
+     */
+    if (inst->fx_param_counts[slot] <= 0) {
+        char t[16];
+        snprintf(t, sizeof(t), "fx%d", slot + 1);
+        chain_mod_refresh_target_param_cache(inst, t);
+    }
+    /*
+     * ...and its LAYOUT, for the same reason: parse_ui_hierarchy_cache reads
+     * module.json, and a module that serves its contract from the DSP serves
+     * its layout there too. Without it the CC map has no page names, so an EQ
+     * lists four parameters called "Gain" with nothing to tell them apart.
+     */
+    if (inst->fx_ui_hierarchy[slot] && !inst->fx_ui_hierarchy[slot][0] && api->get_param) {
+        if (api->get_param(fx_inst, "ui_pages", inst->fx_ui_hierarchy[slot],
+                           CHAIN_UI_HIERARCHY_LEN) <= 0) {
+            api->get_param(fx_inst, "ui_hierarchy", inst->fx_ui_hierarchy[slot],
+                           CHAIN_UI_HIERARCHY_LEN);
+        }
+    }
+    chain_auto_cc_refresh(inst, NULL);
 
     snprintf(msg, sizeof(msg), "Audio FX v2 loaded: %s (slot %d, %d params)", fx_name, slot, inst->fx_param_counts[slot]);
     v2_chain_log(inst, msg);
@@ -739,7 +777,39 @@ int v2_load_audio_fx(chain_instance_t *inst, const char *fx_name) {
     parse_ui_hierarchy_cache(fx_dir, inst->fx_ui_hierarchy[slot], CHAIN_UI_HIERARCHY_LEN);
     inst->mod_param_refresh_ms_fx[slot] = 0;
 
+
     inst->fx_count++;
+
+    /*
+     * AFTER fx_count, which is the whole point.
+     *
+     * chain_mod_refresh_target_param_cache rejects a slot at or beyond
+     * fx_count, so asking before the count includes this slot returns -1 and
+     * the parameter list stays empty -- the FX then shows in the CC Map with
+     * nothing to assign, exactly as if it had no parameters at all.
+     *
+     * The fallback itself is the synth's: module.json may declare no params
+     * because the module serves its contract from the DSP at runtime.
+     */
+    if (inst->fx_param_counts[slot] <= 0) {
+        char t[16];
+        snprintf(t, sizeof(t), "fx%d", slot + 1);
+        chain_mod_refresh_target_param_cache(inst, t);
+    }
+    /*
+     * ...and its LAYOUT, for the same reason: parse_ui_hierarchy_cache reads
+     * module.json, and a module that serves its contract from the DSP serves
+     * its layout there too. Without it the CC map has no page names, so an EQ
+     * lists four parameters called "Gain" with nothing to tell them apart.
+     */
+    if (inst->fx_ui_hierarchy[slot] && !inst->fx_ui_hierarchy[slot][0] && api->get_param) {
+        if (api->get_param(fx_inst, "ui_pages", inst->fx_ui_hierarchy[slot],
+                           CHAIN_UI_HIERARCHY_LEN) <= 0) {
+            api->get_param(fx_inst, "ui_hierarchy", inst->fx_ui_hierarchy[slot],
+                           CHAIN_UI_HIERARCHY_LEN);
+        }
+    }
+    chain_auto_cc_refresh(inst, NULL);
 
     snprintf(msg, sizeof(msg), "Audio FX v2 loaded: %s (slot %d, %d params)", fx_name, slot, inst->fx_param_counts[slot]);
     v2_chain_log(inst, msg);
@@ -923,6 +993,22 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
             inst->knob_cc_out = temp_patch.knob_cc_out ? 1 : 0;
             inst->cc_control  = temp_patch.cc_control ? 1 : 0;
             inst->cc_component_mask = temp_patch.cc_component_mask;
+            /*
+             * Replay the saved CC assignments.
+             *
+             * THIS is the path a set restore takes -- the boot restore calls
+             * set_param("load_file"), not the patch-index load -- so hooking
+             * only the latter meant assignments saved correctly and came back
+             * to nothing on every reboot.
+             *
+             * After v2_load_from_patch_info, because the table these edit is
+             * built when the modules load.
+             */
+            chain_cc_parse_overrides(inst, temp_patch.cc_overrides
+                                           ? temp_patch.cc_overrides : "");
+            /* temp_patch is a local: its heap field is ours to release. */
+            free(temp_patch.cc_overrides);
+            temp_patch.cc_overrides = NULL;
             knob_emit_cc_out_all(inst);
             /* Check for "modified" field to restore dirty state */
             FILE *mf = fopen(val, "r");
@@ -989,6 +1075,78 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
     else if (strcmp(key, "cc_control") == 0) {
         inst->cc_control = (val && (val[0] == '1' || val[0] == 't')) ? 1 : 0;
         inst->dirty = 1;
+        return;
+    }
+    else if (strncmp(key, "cc_learn_idx:", 13) == 0) {
+        /* Arm learn for the Nth row. By index for the same reason cc_idx is:
+         * the UI reaches these through keys that are split on their first
+         * colon, so it cannot spell "component:parameter". */
+        int i = atoi(key + 13);
+        inst->cc_learn_target[0] = '\0';
+        inst->cc_learn_param[0] = '\0';
+        if (i >= 0 && i < inst->auto_cc_count) {
+            snprintf(inst->cc_learn_target, sizeof(inst->cc_learn_target), "%s",
+                     inst->auto_cc[i].target);
+            snprintf(inst->cc_learn_param, sizeof(inst->cc_learn_param), "%s",
+                     inst->auto_cc[i].param);
+        }
+        return;
+    }
+    else if (strncmp(key, "cc_idx:", 7) == 0) {
+        int i = atoi(key + 7);
+        if (i >= 0 && i < inst->auto_cc_count && val && val[0]) {
+            /* Copy first: chain_cc_assign rewrites the table, so target/param
+             * read through the entry pointer would move under it. */
+            char t[16], pm[32];
+            snprintf(t, sizeof(t), "%s", inst->auto_cc[i].target);
+            snprintf(pm, sizeof(pm), "%s", inst->auto_cc[i].param);
+            chain_cc_assign(inst, t, pm, atoi(val));
+        }
+        return;
+    }
+    else if (strcmp(key, "cc_learn") == 0) {
+        /* "target|param" arms; "" disarms. */
+        inst->cc_learn_target[0] = '\0';
+        inst->cc_learn_param[0] = '\0';
+        if (val && val[0]) {
+            const char *bar = strchr(val, '|');
+            if (bar) {
+                size_t tl = (size_t)(bar - val);
+                if (tl < sizeof(inst->cc_learn_target)) {
+                    memcpy(inst->cc_learn_target, val, tl);
+                    inst->cc_learn_target[tl] = '\0';
+                    if (bar[1]) {
+                        snprintf(inst->cc_learn_param, sizeof(inst->cc_learn_param), "%s", bar + 1);
+                    } else {
+                        /* "fx1|" -- the UI cannot name a parameter for a
+                         * component that has no rows to name one from, so it
+                         * asks for the first and the DSP resolves it here,
+                         * where the parameter list actually is. */
+                        const char *first = chain_cc_first_param(inst, inst->cc_learn_target);
+                        if (first) snprintf(inst->cc_learn_param, sizeof(inst->cc_learn_param), "%s", first);
+                        else inst->cc_learn_target[0] = '\0';
+                    }
+                }
+            }
+        }
+        return;
+    }
+    else if (strcmp(key, "cc_assign") == 0) {
+        /* "target|param|cc" -- jog-chosen, as opposed to learned. */
+        if (val && val[0]) {
+            char tmp[64];
+            snprintf(tmp, sizeof(tmp), "%s", val);
+            char *b1 = strchr(tmp, '|');
+            char *b2 = b1 ? strchr(b1 + 1, '|') : NULL;
+            if (b1 && b2) {
+                *b1 = '\0'; *b2 = '\0';
+                chain_cc_assign(inst, tmp, b1 + 1, atoi(b2 + 1));
+            }
+        }
+        return;
+    }
+    else if (strcmp(key, "cc_overrides") == 0) {
+        chain_cc_parse_overrides(inst, val ? val : "");
         return;
     }
     else if (strcmp(key, "cc_component_mask") == 0) {
@@ -1483,8 +1641,86 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     }
     /* Raw mask, so the patch can round-trip every component in one field
      * rather than one key per component. */
+    /*
+     * The Nth row of the CC map, addressed by INDEX.
+     *
+     * Index, not "target:param", because the UI reaches these through the knob
+     * grid, whose keys are split on their first colon -- a key carrying a
+     * component and a parameter loses half of itself on the way in. The order
+     * is the map's own and the page is built from the same read, so the two
+     * cannot disagree.
+     */
+    if (strncmp(key, "cc_idx:", 7) == 0) {
+        int i = atoi(key + 7);
+        if (i < 0 || i >= inst->auto_cc_count) return snprintf(buf, buf_len, "%s", "");
+        if (inst->auto_cc[i].cc == CC_NONE) return snprintf(buf, buf_len, "%s", "-1");
+        return snprintf(buf, buf_len, "%u", (unsigned)inst->auto_cc[i].cc);
+    }
+    if (strcmp(key, "cc_learn") == 0) {
+        /* "target|param" while armed, empty otherwise. Readable so the UI can
+         * confirm the arm landed and, later, show which row is waiting. */
+        if (!inst->cc_learn_target[0]) return snprintf(buf, buf_len, "%s", "");
+        return snprintf(buf, buf_len, "%s|%s",
+                        inst->cc_learn_target, inst->cc_learn_param);
+    }
+    if (strcmp(key, "cc_overrides") == 0) {
+        int off = 0;
+        for (int i = 0; i < inst->cc_override_count; i++) {
+            const cc_override_t *o = &inst->cc_overrides[i];
+            int n = snprintf(buf + off, (size_t)(buf_len - off), "%s|%s|%u;",
+                             o->target, o->param, (unsigned)o->cc);
+            if (n < 0 || n >= buf_len - off) break;
+            off += n;
+        }
+        return off;
+    }
     if (strcmp(key, "cc_component_mask") == 0) {
         return snprintf(buf, buf_len, "%u", inst->cc_component_mask);
+    }
+    /*
+     * The loaded components, for the CC Map browser: "target|module|ch|on;".
+     *
+     * The map runs to ~97 rows across several components, which is a list to
+     * scroll rather than a thing to read. Listing components first lets the
+     * user pick the module they are looking at and see only its rows.
+     *
+     * ch is the channel those CCs actually arrive on. Dispatch is per SLOT
+     * (shadow_chain_dispatch_midi_to_slots filters on the slot's receive
+     * channel), so every component of a slot shares it -- reported from here
+     * so the page cannot derive it and get it wrong.
+     */
+    if (strcmp(key, "cc_components") == 0) {
+        int off = 0;
+        int ch = -1;
+        if (inst->host && inst->host->slot_recv_channel)
+            ch = inst->host->slot_recv_channel((void *)inst);
+        char t[16];
+        for (int i = 0; i < inst->midi_fx_count && i < MAX_MIDI_FX; i++) {
+            if (!inst->current_midi_fx_modules[i][0]) continue;
+            snprintf(t, sizeof(t), "midi_fx%d", i + 1);
+            int n = snprintf(buf + off, (size_t)(buf_len - off), "%s|%s|%d|%d;",
+                             t, inst->current_midi_fx_modules[i], ch + 1,
+                             chain_cc_component_enabled(inst, t) ? 1 : 0);
+            if (n < 0 || n >= buf_len - off) return off;
+            off += n;
+        }
+        if (inst->current_synth_module[0]) {
+            int n = snprintf(buf + off, (size_t)(buf_len - off), "synth|%s|%d|%d;",
+                             inst->current_synth_module, ch + 1,
+                             chain_cc_component_enabled(inst, "synth") ? 1 : 0);
+            if (n < 0 || n >= buf_len - off) return off;
+            off += n;
+        }
+        for (int i = 0; i < inst->fx_count && i < MAX_AUDIO_FX; i++) {
+            if (!inst->current_fx_modules[i][0]) continue;
+            snprintf(t, sizeof(t), "fx%d", i + 1);
+            int n = snprintf(buf + off, (size_t)(buf_len - off), "%s|%s|%d|%d;",
+                             t, inst->current_fx_modules[i], ch + 1,
+                             chain_cc_component_enabled(inst, t) ? 1 : 0);
+            if (n < 0 || n >= buf_len - off) return off;
+            off += n;
+        }
+        return off;
     }
     /*
      * The whole auto-CC map as "cc,target,param;" records, for the MIDI page.
@@ -1506,8 +1742,11 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
             const chain_param_info_t *pi =
                 knob_find_param(inst, a->target, a->param);
             const char *label = (pi && pi->name[0]) ? pi->name : a->param;
-            int n = snprintf(buf + off, (size_t)(buf_len - off), "%u|%s|%s|%s;",
-                             (unsigned)a->cc, a->target, a->param, label);
+            /* -1 when the parameter has no number yet -- the row still exists,
+             * because the list is what the user picks FROM. */
+            int ccv = (a->cc == CC_NONE) ? -1 : (int)a->cc;
+            int n = snprintf(buf + off, (size_t)(buf_len - off), "%d|%s|%s|%s|%s;",
+                             ccv, a->target, a->param, label, a->group);
             if (n < 0 || n >= buf_len - off) break;   /* truncate cleanly */
             off += n;
         }

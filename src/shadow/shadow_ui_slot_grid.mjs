@@ -26,6 +26,13 @@
  * show.
  */
 
+/** "0".."127", the option list every CC cell shares. */
+const CC_NUMBERS = (() => {
+    const out = [];
+    for (let i = 0; i <= 127; i++) out.push(String(i));
+    return out;
+})();
+
 /** 1..16 as strings, for the channel enums. */
 const CHANNELS = (() => {
     const out = [];
@@ -345,18 +352,127 @@ export function ccMapMenu(raw) {
     for (const r of rows) {
         const bits = r.split("|");
         if (bits.length < 3) continue;
+        const name = (bits[3] && bits[3].length) ? bits[3] : bits[2];
+        const group = bits[4] || "";
         parsed.push({
+            index: parsed.length,          /* position in the map == cc_idx:N */
             cc: bits[0], target: bits[1], param: bits[2],
-            label: (bits[3] && bits[3].length) ? bits[3] : bits[2],
+            name, group,
+            /*
+             * The page name earns its place: an EQ declares four parameters
+             * called "Gain" and the list is unreadable without it. Dropped when
+             * the name already starts with it, so a module that spells its own
+             * parameters "Band 1 Gain" does not read "Band 1 Band 1 Gain".
+             */
+            label: (group && name.toLowerCase().indexOf(group.toLowerCase()) !== 0)
+                ? (group + " " + name) : name,
         });
     }
-    if (!parsed.length) return [{ label: "No mapping", action: "cc_map_none" }];
+    return parsed;
+}
 
-    const multi = parsed.some((e) => e.target !== parsed[0].target);
-    return parsed.map((e) => {
-        const where = multi ? shortTarget(e.target) + " " : "";
-        return { label: e.cc + "  " + where + e.label, action: "cc_map_row" };
+/** "target|module|ch|on;" -> [{target, module, ch, on}] */
+export function ccComponents(raw) {
+    const out = [];
+    for (const r of String(raw || "").split(";").filter(Boolean)) {
+        const b = r.split("|");
+        if (b.length < 4) continue;
+        out.push({ target: b[0], module: b[1], ch: parseInt(b[2], 10) || 0,
+                   on: b[3] === "1" });
+    }
+    return out;
+}
+
+/**
+ * CC Map, two levels deep.
+ *
+ * The top level is the loaded modules, because ~97 rows across several
+ * components is a list to scroll rather than a thing to read, and a user
+ * looking at one module wants that module's numbers. Each row carries the
+ * channel those CCs arrive on, since a map without a channel is only half an
+ * address -- and OFF where the component's gate is closed, so a page of
+ * numbers that currently do nothing says so.
+ */
+export function ccMapLevels(mapRaw, compRaw) {
+    const rows = ccMapMenu(mapRaw);
+    const comps = ccComponents(compRaw);
+    const levels = {};
+
+    if (!comps.length) {
+        levels.ccmap = { label: "CC Map", knobs: [], params: [],
+                         menu: [{ label: "No module", action: "cc_map_none" }],
+                         menu_label: "CC Map" };
+        return levels;
+    }
+
+    /*
+     * The index is a MENU, not a set of level-doors.
+     *
+     * A menu entry may carry `level` as well as `action` (see mapMenuEntries),
+     * so it navigates AND draws as one list -- which is the point: doors render
+     * as grid cells, one page per component, and the thing wanted here is a
+     * single list reading "module, channel, count". `value` is right-aligned,
+     * so the channel and count line up down the page.
+     */
+    const index = comps.map((c) => {
+        const n = rows.filter((r) => r.target === c.target).length;
+        return {
+            label: c.module,
+            value: (c.on ? ("Ch " + c.ch) : "OFF") + "  " + n,
+            level: "ccmap_" + c.target,
+        };
     });
+    levels.ccmap = { label: "CC Map", knobs: [], params: [],
+                     menu: index, menu_label: "CC Map" };
+
+    for (const c of comps) {
+        const mine = rows.filter((r) => r.target === c.target);
+        levels["ccmap_" + c.target] = {
+            /* Reachable from the CC Map row, but NOT in the jog order: these
+             * belong to the row that opens them, not to the settings walk. */
+            hidden: true,
+            label: c.module,
+            knobs: [], params: [],
+            /*
+             * EDITABLE cells, not a list of text.
+             *
+             * Each parameter is an enum over "0".."127" whose value is its CC,
+             * so the number is visible, turning it changes the assignment, and
+             * clicking opens the option picker -- an overlay the controller
+             * owns and survives, unlike a confirm modal raised from the grid.
+             * A read-only list gave the user nothing to do and no way to see
+             * that anything had happened.
+             *
+             * Keyed by INDEX into the map, because a grid key is split on its
+             * first colon and "synth:bd_c_tune" would lose half of itself.
+             */
+            /*
+             * A LIST, and one page. Cells would be a page per eight rows and
+             * make a 97-parameter module thirteen pages deep, which is not a
+             * map you can read. Clicking a row raises the CC card instead --
+             * an overlay over this list, the way the knob card sits over the
+             * grid.
+             */
+            knobs: [], params: [],
+            menu: mine.length
+                ? mine.map((r) => ({
+                      label: r.label,
+                      /* "--" reads as "no number yet", which is most rows now
+                       * that nothing is auto-assigned. The channel is only
+                       * meaningful once there IS a number. */
+                      value: (parseInt(r.cc, 10) < 0)
+                          ? "--"
+                          : (r.cc + " Ch" + c.ch),
+                      /* index AND label: the card shows the parameter name,
+                       * and a read to fetch it would cost ~2.8ms on a click. */
+                      action: "cc_edit:" + r.index + "|" + r.label,
+                  }))
+                : [{ label: "No CC free - learn one",
+                     action: "cc_learn_first:" + c.target }],
+            menu_label: c.module + " Ch " + c.ch,
+        };
+    }
+    return levels;
 }
 
 /** "fx1" -> "FX1", "midi_fx1" -> "MF1", "synth" -> "SY". */
@@ -367,7 +483,7 @@ function shortTarget(t) {
     return t;
 }
 
-export function slotGridHierarchy(hasPreset, ccMapRaw) {
+export function slotGridHierarchy(hasPreset, ccMapRaw, ccCompRaw) {
     const menu = SLOT_GRID_ACTIONS
         .filter((a) => a.always || hasPreset)
         .map((a) => ({ label: a.label, action: a.action }));
@@ -402,17 +518,18 @@ export function slotGridHierarchy(hasPreset, ccMapRaw) {
         params: SLOT_MIDI_PARAMS.map((p) => ({ key: p.key }))
             .concat([{ level: "ccmap", label: "CC Map" }]),
     };
-    levels.ccmap = {
-        label: "CC Map", knobs: [], params: [],
-        menu: ccMapMenu(ccMapRaw), menu_label: "CC Map",
-    };
+    Object.assign(levels, ccMapLevels(ccMapRaw, ccCompRaw));
     return { modes: null, levels };
 }
 
 /** Every declared param across the slot page and both LFO pages. */
-export function allSlotGridParams() {
+export function allSlotGridParams(ccMapRaw) {
+    const cc = ccMapMenu(ccMapRaw).map((r) => ({
+        key: "cc" + r.index, name: r.label, type: "enum",
+        options: CC_NUMBERS, short_options: CC_NUMBERS, default: 0,
+    }));
     return SLOT_GRID_PARAMS.concat(lfoParams(1)).concat(lfoParams(2))
-                           .concat(SLOT_MIDI_PARAMS);
+                           .concat(SLOT_MIDI_PARAMS).concat(cc);
 }
 
 /** Which real param key a grid key reads and writes, or null when derived. */
@@ -435,6 +552,9 @@ export function realKeyFor(gridKey) {
      * something that was already on. Colon-free keys make the mapping explicit
      * and immune to how the caller spells the prefix.
      */
+    /* ccN -> the Nth row of the map. The device answers with the CC number,
+     * and writing one reassigns it (swapping with whoever held it). */
+    if (/^cc\d+$/.test(gridKey)) return "cc_idx:" + gridKey.slice(2);
     if (gridKey === "cc_all") return "cc_control";
     if (gridKey === "cc_synth") return "cc_control:synth";
     if (gridKey === "cc_fx1") return "cc_control:fx1";
@@ -487,9 +607,16 @@ export function createSlotGridIo(io) {
                  * than a row at a time: 97 reads at ~2.8ms each would cost most
                  * of a second and paint the page in pieces. */
                 const map = io.readSlotParam ? io.readSlotParam("auto_cc_map") : "";
-                return JSON.stringify(slotGridHierarchy(!!io.hasPreset(), map));
+                const comps = io.readSlotParam ? io.readSlotParam("cc_components") : "";
+                return JSON.stringify(slotGridHierarchy(!!io.hasPreset(), map, comps));
             }
-            if (k === "chain_params") return JSON.stringify(allSlotGridParams());
+            if (k === "chain_params") {
+                /* The CC cells are declared from the same map the pages are
+                 * built from, so the two cannot disagree about how many rows
+                 * there are or what they are called. */
+                const map = io.readSlotParam ? io.readSlotParam("auto_cc_map") : "";
+                return JSON.stringify(allSlotGridParams(map));
+            }
             if (k === "mpe_mode") return io.isMpeMode() ? "1" : "0";
             if (k === "forward_channel") {
                 const raw = parseInt(io.readSlotParam("slot:forward_channel"), 10);

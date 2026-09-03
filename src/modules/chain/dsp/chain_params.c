@@ -5,6 +5,7 @@
  */
 
 #include "chain_internal.h"
+#include "host/cc_reserved.h"
 
 /*
  * Format a parameter value for display based on its metadata.
@@ -1395,29 +1396,13 @@ CHAIN_INTERNAL const char *chain_cc_first_param(chain_instance_t *inst, const ch
 
 
 /*
- * Numbers a parameter may not be given.
- *
- *   0, 32       bank select MSB/LSB -- a 14-bit pair, not a control
- *   71-78       Move own chain knobs, relative
- *   102-109     the same eight knobs, absolute
- *
- * The knob ranges are refused outright rather than only while a slot has knob
- * mappings: both blocks run BEFORE the map in chain_midi.c, so a parameter
- * assigned there would work until the day someone assigned a chain knob and
- * then stop. A number that works until something unrelated changes is worse
- * than one that cannot be picked at all.
- *
- * 16 of 128, and one definition -- the assign path, the learn path and the
- * jog all ask this rather than restating the ranges.
+ * Numbers a parameter may not be given -- see src/host/cc_reserved.h, which the
+ * Master FX map asks too so the two buses cannot drift apart.
  */
 CHAIN_INTERNAL int chain_cc_reserved(int cc)
 {
-    if (cc == 0 || cc == 32) return 1;
-    if (cc >= 71 && cc <= 78) return 1;
-    if (cc >= 102 && cc <= 109) return 1;
-    return 0;
+    return cc_reserved(cc);
 }
-
 
 CHAIN_INTERNAL int chain_cc_assign(chain_instance_t *inst, const char *target,
                                    const char *param, int cc)

@@ -18,6 +18,7 @@
 #include "master_fx_key.h"    /* master_fx_route_* — header-only so tests/host can run it */
 #include "master_fx_snapshot.h" /* master_fx_snapshot_* — likewise */
 #include "master_fx_saved_state.h" /* object or opaque-string state at boot */
+#include "cc_reserved.h"
 #include "fx_midi_filter.h"   /* fx_midi_channel_accepts — header-only so tests/host can run it */
 #include "chain_permute.h"    /* insert/remove/move as an array permutation; shared with the chain DSP */
 #include "shadow_set_pages.h"
@@ -1216,16 +1217,18 @@ static float mfx_learn_min, mfx_learn_max;
 static int  mfx_learn_is_int;
 static int  mfx_learn_reject = -1;
 
-/* Same reserved numbers the chain refuses; see chain_cc_reserved. Restated
- * rather than shared because the chain DSP is a module and this is the host --
- * they cannot see each other, and a comment is cheaper than a new header. */
-static int mfx_cc_reserved(int cc)
-{
-    if (cc == 0 || cc == 32) return 1;
-    if (cc >= 71 && cc <= 78) return 1;
-    if (cc >= 102 && cc <= 109) return 1;
-    return 0;
-}
+/*
+ * CC control for the master bus, on by default.
+ *
+ * A slot can say "notes yes, CC no" per slot and per component; the master bus
+ * could not say it at all, which is the same asymmetry as having no CC Map --
+ * with every parameter addressable, any controller sending on the listen
+ * channel moves something, so refusing has to be expressible.
+ */
+static int mfx_cc_control = 1;
+
+/* One rule, shared with the chain DSP -- see cc_reserved.h. */
+static int mfx_cc_reserved(int cc) { return cc_reserved(cc); }
 
 static mfx_cc_t *mfx_cc_find_cc(uint8_t cc)
 {
@@ -1298,7 +1301,7 @@ void shadow_master_fx_forward_midi(const uint8_t *msg, int len, int source) {
      * at the same time, which is the double-apply the chain avoids by the same
      * rule.
      */
-    if (len >= 3 && (msg[0] & 0xF0) == 0xB0) {
+    if (mfx_cc_control && len >= 3 && (msg[0] & 0xF0) == 0xB0) {
         uint8_t cc = msg[1];
         if (mfx_learn_slot >= 0) {
             if (mfx_cc_reserved((int)cc)) {
@@ -3204,6 +3207,19 @@ void shadow_inprocess_handle_param_request(void) {
                     snprintf(mfx_learn_param, sizeof(mfx_learn_param), "%s", prm);
                     mfx_learn_min = (float)mn; mfx_learn_max = (float)mx;
                     mfx_learn_is_int = isint;
+                }
+                shadow_param->error = 0;
+                shadow_param_publish_response(req_id);
+                return;
+            }
+            if (strcmp(param_key, "cc_control") == 0) {
+                if (req_type == 2) {
+                    shadow_param->result_len =
+                        snprintf(shadow_param->value, SHADOW_PARAM_VALUE_LEN,
+                                 "%d", mfx_cc_control ? 1 : 0);
+                } else {
+                    mfx_cc_control = (shadow_param->value[0] == '1' ||
+                                      shadow_param->value[0] == 't') ? 1 : 0;
                 }
                 shadow_param->error = 0;
                 shadow_param_publish_response(req_id);

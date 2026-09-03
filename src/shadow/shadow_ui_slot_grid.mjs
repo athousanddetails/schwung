@@ -900,16 +900,40 @@ export function masterGridHierarchy(hasPreset, ccRows, chLabel) {
     /* The SAME builder the slot contract uses, one bus over. */
     Object.assign(levels, lfoLevels([1, 2], MASTER_KEY_PREFIX));
     levels.actions = { label: "Actions", knobs: [], params: [], menu: menu, menu_label: "Actions" };
+    /*
+     * A MIDI page, as a slot has. One switch rather than a slot's six: Master
+     * FX positions are not a chain of parts from different authors, so there is
+     * no per-component case to answer -- but "notes yes, CC no" must still be
+     * sayable on this bus.
+     */
+    levels.midi = {
+        label: "MIDI",
+        knobs: [MASTER_CC_CONTROL_KEY],
+        params: [{ key: MASTER_CC_CONTROL_KEY }, { level: "ccmap", label: "CC Map" }],
+    };
     Object.assign(levels, masterCcMapLevels(ccRows, chLabel));
     /* After Actions, same as a slot: a level emits straight after the entry
      * that navigates to it. */
-    levels.root.params.push({ level: "ccmap", label: "CC Map" });
+    levels.root.params.push({ level: "midi", label: "MIDI" });
     return { modes: null, levels };
 }
 
 /** Every declared param across the root page and both LFO pages. */
+export const MASTER_CC_CONTROL_KEY = MASTER_KEY_PREFIX + "cc_control";
+
+/*
+ * One switch, not a slot's six: Master FX positions are not a chain of parts
+ * from different authors, so there is no per-component case to answer. But
+ * "notes yes, CC no" has to be sayable here too -- with every parameter
+ * addressable, any controller on the listen channel moves something.
+ */
+export const MASTER_MIDI_PARAMS = [
+    { key: MASTER_CC_CONTROL_KEY, name: "CC Ctrl", type: "enum",
+      options: ["Off", "On"], short_options: ["OFF", "ON"], default: 1 },
+];
+
 export function allMasterGridParams() {
-    return MASTER_GRID_PARAMS
+    return MASTER_MIDI_PARAMS.concat(MASTER_GRID_PARAMS)
         .concat(lfoParams(1, MASTER_KEY_PREFIX))
         .concat(lfoParams(2, MASTER_KEY_PREFIX));
 }

@@ -484,7 +484,18 @@ export function ccMapLevels(mapRaw, compRaw) {
                       /* index AND label: the card shows the parameter name,
                        * and a read to fetch it would cost ~2.8ms on a click. */
                       action: "cc_edit:" + r.index + "|" + r.label,
-                  }))
+                  })).concat(
+                      /*
+                       * A trailing Clear all, only when there is something to
+                       * clear. Move keeps the Delete button for itself -- the
+                       * shim forwards only jog, back, tracks, knobs and mute --
+                       * so this has to be a row. Forwarding Delete would work,
+                       * but Move own delete still fires, and losing a clip
+                       * because you meant to clear a CC is the worse trade.
+                       */
+                      mine.some((q) => parseInt(q.cc, 10) >= 0)
+                          ? [{ label: "Clear all", action: "cc_clear_all:" + c.target }]
+                          : [])
                 /* Every parameter is listed now, assigned or not, so an
                  * empty list means the module declares none -- not that the
                  * numbers ran out. No action: there is nothing to assign. */
@@ -861,7 +872,11 @@ export function masterCcMapLevels(rows, chLabel) {
                        * two buses must read alike. */
                       value: p.cc >= 0 ? (p.cc + " " + (chLabel || "")) : "--",
                       action: "mcc_edit:" + r.slot + ":" + i + "|" + p.name,
-                  }))
+                  })).concat(
+                      /* Only when there is something to clear. */
+                      ps.some((q) => q.cc >= 0)
+                          ? [{ label: "Clear all", action: "mcc_clear_all:" + r.slot }]
+                          : [])
                 : [{ label: "No parameters", action: "" }],
         };
     }

@@ -8212,6 +8212,52 @@ function getSlotStateWithRetry(slotIndex, key, retries) {
  * means "not looked yet"; "" means looked and there were none. */
 let ccOverridesSeen = [];
 
+
+/*
+ * Master FX CC Map rows.
+ *
+ * The slot map comes ready-made from the chain DSP. Master FX has no chain, so
+ * this joins the three things that make a row: the loaded positions, the
+ * parameters each publishes, and the host table of assignments. The parameter
+ * RANGE travels with an assignment (see master_fx:cc_assign), which is why it
+ * is carried here rather than looked up again when a CC arrives.
+ */
+function buildMasterCcRows() {
+    const rows = [];
+    const assigned = {};
+    const raw = getSlotParam(0, "master_fx:cc_map") || "";
+    for (const rec of raw.split(";")) {
+        if (!rec) continue;
+        const b = rec.split("|");
+        if (b.length < 3) continue;
+        assigned[b[0] + ":" + b[1]] = parseInt(b[2], 10);
+    }
+
+    for (let i = 1; i <= MASTER_FX_SLOTS; i++) {
+        const mod = masterFxConfig && masterFxConfig["fx" + i] && masterFxConfig["fx" + i].module;
+        if (!mod) continue;
+        let params = [];
+        try {
+            const cp = getSlotParam(0, "master_fx:fx" + i + ":chain_params");
+            const parsed = cp ? JSON.parse(cp) : [];
+            if (Array.isArray(parsed)) {
+                params = parsed.map((p) => ({
+                    key: p.key,
+                    name: p.name || p.key,
+                    group: p.group || "",
+                    type: p.type || "float",
+                    min: (typeof p.min === "number") ? p.min : 0,
+                    max: (typeof p.max === "number") ? p.max : 1,
+                    cc: (assigned[(i - 1) + ":" + p.key] !== undefined)
+                        ? assigned[(i - 1) + ":" + p.key] : -1,
+                })).filter((p) => p.key);
+            }
+        } catch (e) { /* a module with no contract contributes no rows */ }
+        rows.push({ slot: i - 1, module: mod, params });
+    }
+    return rows;
+}
+
 function buildSlotPatchJson(slotIndex, name, forAutosave, moduleChanged) {
     const cfg = chainConfigs[slotIndex];
     if (!cfg) return null;
@@ -12032,6 +12078,10 @@ let ccCardIndex = -1;
 let ccCardName = "";
 let ccCardCc = 0;
 let ccCardLearning = false;
+/* Which bus the open card edits. A slot addresses rows by index into the chain
+ * map; Master FX addresses them by position + parameter, because the host table
+ * is keyed that way and there is no chain map to index into. */
+let ccCardMaster = null;   /* null = a slot; else { slot, key, min, max, isInt } */
 let ccCardNotice = "";        /* transient line, e.g. a refused CC */
 let ccCardNoticeUntil = 0;
 
@@ -12049,6 +12099,7 @@ function ccReserved(n) {
 function openCcCard(slot, index, name) {
     ccCardSlot = slot;
     ccCardIndex = index;
+    ccCardMaster = null;
     ccCardName = name || "";
     ccCardLearning = false;
     ccCardNotice = "";
@@ -12059,13 +12110,39 @@ function openCcCard(slot, index, name) {
     needsRedraw = true;
 }
 
+function openMasterCcCard(row, p) {
+    ccCardSlot = 0;                    /* Master FX is IPC slot 0 by convention */
+    ccCardIndex = -1;
+    ccCardMaster = { slot: row.slot, key: p.key, min: p.min, max: p.max,
+                     isInt: (p.type === "int" || p.type === "enum") ? 1 : 0 };
+    ccCardName = p.name || p.key;
+    ccCardLearning = false;
+    ccCardNotice = "";
+    ccCardCc = (typeof p.cc === "number") ? p.cc : -1;
+    ccCardOpen = true;
+    needsRedraw = true;
+}
+
+function ccCardWrite(next) {
+    if (ccCardMaster) {
+        const m = ccCardMaster;
+        setSlotParam(0, "master_fx:cc_assign",
+                     m.slot + "|" + m.key + "|" + next + "|" + m.min + "|" + m.max + "|" + m.isInt);
+    } else {
+        setSlotParam(ccCardSlot, "cc_idx:" + ccCardIndex, String(next));
+    }
+    paramPagesContractChanged();
+}
+
 function closeCcCard() {
     if (!ccCardOpen) return false;
     ccCardOpen = false;
     ccCardLearning = false;
     /* Disarm: leaving the card must not leave a controller able to steal the
      * next CC into a parameter the user is no longer looking at. */
-    setSlotParam(ccCardSlot, "cc_learn", "");
+    if (ccCardMaster) setSlotParam(0, "master_fx:cc_learn", "");
+    else              setSlotParam(ccCardSlot, "cc_learn", "");
+    ccCardMaster = null;
     needsRedraw = true;
     return true;
 }
@@ -12124,7 +12201,13 @@ function handleCcCardMidi(data) {
     if (d1 === 3) {                        /* jog CLICK */
         if (d2 > 0) {
             ccCardLearning = true;
-            setSlotParam(ccCardSlot, "cc_learn_idx:" + ccCardIndex, "1");
+            if (ccCardMaster) {
+                const m = ccCardMaster;
+                setSlotParam(0, "master_fx:cc_learn",
+                             m.slot + "|" + m.key + "|" + m.min + "|" + m.max + "|" + m.isInt);
+            } else {
+                setSlotParam(ccCardSlot, "cc_learn_idx:" + ccCardIndex, "1");
+            }
             needsRedraw = true;
         }
         return true;
@@ -12144,10 +12227,9 @@ function handleCcCardMidi(data) {
         if (next > 127) next = 127;
         if (next !== ccCardCc) {
             ccCardCc = next;
-            setSlotParam(ccCardSlot, "cc_idx:" + ccCardIndex, String(next));
             /* The row behind the card carries this number in its label, so the
              * grid has to re-read or the list keeps showing the old value. */
-            paramPagesContractChanged();
+            ccCardWrite(next);
             needsRedraw = true;
         }
         return true;
@@ -12167,7 +12249,9 @@ function ccCardPoll() {
     if (!ccCardOpen || !ccCardLearning) return;
 
     /* Did the DSP refuse a reserved number? Read once -- it is an event. */
-    const rej = getSlotParam(ccCardSlot, "cc_learn_reject");
+    const rej = ccCardMaster
+        ? getSlotParam(0, "master_fx:cc_learn_reject")
+        : getSlotParam(ccCardSlot, "cc_learn_reject");
     const rejN = rej === null ? -1 : parseInt(rej, 10);
     if (!isNaN(rejN) && rejN >= 0) {
         ccCardNotice = "CC " + rejN + " RESERVED";
@@ -12175,8 +12259,19 @@ function ccCardPoll() {
         needsRedraw = true;
     }
 
-    const cur = getSlotParam(ccCardSlot, "cc_idx:" + ccCardIndex);
-    const v = cur === null ? null : parseInt(cur, 10);
+    let v = null;
+    if (ccCardMaster) {
+        /* No index to read: find this parameter in the host table. */
+        const raw = getSlotParam(0, "master_fx:cc_map") || "";
+        for (const rec of raw.split(";")) {
+            const b = rec.split("|");
+            if (b.length >= 3 && parseInt(b[0], 10) === ccCardMaster.slot &&
+                b[1] === ccCardMaster.key) { v = parseInt(b[2], 10); break; }
+        }
+    } else {
+        const cur = getSlotParam(ccCardSlot, "cc_idx:" + ccCardIndex);
+        v = cur === null ? null : parseInt(cur, 10);
+    }
     if (v !== null && !isNaN(v) && v !== ccCardCc) {
         ccCardCc = v;
         ccCardLearning = false;
@@ -12195,6 +12290,18 @@ function runChainSettingAction(slot, key) {
      * turns any control on their surface, and the CC that arrives claims it,
      * swapping with whatever held it. The gesture is the confirmation.
      */
+    if (key && key.indexOf("mcc_edit:") === 0) {
+        /* "mcc_edit:<position>:<paramIndex>|<name>" -- the rows are rebuilt
+         * from the same three sources the page was, so the indices agree. */
+        const rest = key.slice(9);
+        const bar = rest.indexOf("|");
+        const bits = (bar >= 0 ? rest.slice(0, bar) : rest).split(":");
+        const rows = buildMasterCcRows();
+        const row = rows.find((r) => r.slot === parseInt(bits[0], 10));
+        const p = row && row.params[parseInt(bits[1], 10)];
+        if (p) openMasterCcCard(row, p);
+        return;
+    }
     if (key && key.indexOf("cc_edit:") === 0) {
         const rest = key.slice(8);
         const bar = rest.indexOf("|");
@@ -12420,6 +12527,14 @@ function masterGridIoFor() {
          * declared key already carries its "master_fx:" prefix, so these are
          * pass-throughs rather than a mapping. */
         readParam: (key) => getSlotParam(0, key),
+        /*
+         * The CC Map rows, assembled from three sources because Master FX has
+         * no chain to hold them: which positions are loaded (masterFxConfig),
+         * what each declares (its chain_params), and which numbers are taken
+         * (the host assignment table). Called when ui_hierarchy is fetched --
+         * on entry, never on the draw path.
+         */
+        ccRows: () => buildMasterCcRows(),
         /*
          * A WRITE HERE CARRIES THE SAME SIDE EFFECTS THE LIST PATH CARRIED.
          *

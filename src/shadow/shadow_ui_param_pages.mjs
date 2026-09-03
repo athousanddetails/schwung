@@ -1360,3 +1360,18 @@ export function paramPagesContractChanged() {
     }
     return false;
 }
+
+/* The menu row under the cursor, for a host screen that needs to act on it
+ * (the CC Map's Delete). Null when the current page is not a menu. */
+export function paramPagesMenuEntry() {
+    if (!controller || typeof controller.menuEntry !== 'function') return null;
+    return controller.menuEntry() || null;
+}
+
+/* The level key of the current page, so the host can tell a CC Map page from
+ * any other menu without matching on its title. */
+export function paramPagesPageLevel() {
+    if (!controller) return null;
+    const p = controller.page;
+    return (p && p.level) || null;
+}

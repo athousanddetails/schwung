@@ -344,6 +344,23 @@ export const SLOT_MIDI_PARAMS = [
  * case) and kept otherwise, because "FX1 mix" and "mix" are different answers
  * and the cell has no room to always say both.
  */
+/*
+ * A module writes its parameter names however it likes, and 4k-eq writes them
+ * in caps: "GAIN", "HPF". Shouting reads badly down a list.
+ *
+ * Title-case only words of FOUR letters or more. Shorter all-caps words are
+ * acronyms -- LF, HF, LMF, HPF, EQ -- and "Lmf Gain" is worse than "LMF GAIN"
+ * was. Anything already mixed-case is left alone, so a module that names things
+ * properly is never second-guessed.
+ */
+export function prettyName(str) {
+    return String(str || "").replace(/[A-Za-z]+/g, (w) => {
+        if (w.length < 4) return w;
+        if (w !== w.toUpperCase()) return w;      /* already has case: leave it */
+        return w.charAt(0) + w.slice(1).toLowerCase();
+    });
+}
+
 export function ccMapMenu(raw) {
     /* "cc|target|key|Display Name;" -- pipe, not comma, because a display
      * name may contain one. */
@@ -352,8 +369,8 @@ export function ccMapMenu(raw) {
     for (const r of rows) {
         const bits = r.split("|");
         if (bits.length < 3) continue;
-        const name = (bits[3] && bits[3].length) ? bits[3] : bits[2];
-        const group = bits[4] || "";
+        const name = prettyName((bits[3] && bits[3].length) ? bits[3] : bits[2]);
+        const group = prettyName(bits[4] || "");
         parsed.push({
             index: parsed.length,          /* position in the map == cc_idx:N */
             cc: bits[0], target: bits[1], param: bits[2],
@@ -463,7 +480,7 @@ export function ccMapLevels(mapRaw, compRaw) {
                        * meaningful once there IS a number. */
                       value: (parseInt(r.cc, 10) < 0)
                           ? "--"
-                          : (r.cc + (c.ch > 0 ? (" Ch" + c.ch) : " All")),
+                          : (r.cc + (c.ch > 0 ? (" Ch " + c.ch) : " All")),
                       /* index AND label: the card shows the parameter name,
                        * and a read to fetch it would cost ~2.8ms on a click. */
                       action: "cc_edit:" + r.index + "|" + r.label,
@@ -789,7 +806,69 @@ export const MASTER_GRID_ACTIONS = [
  *
  * @param {boolean} hasPreset  whether a master preset is currently loaded
  */
-export function masterGridHierarchy(hasPreset) {
+
+/*
+ * Master FX CC Map.
+ *
+ * Same two levels as a slot: the loaded positions, then one position's
+ * parameters. It cannot share the slot builder because the two get their rows
+ * from opposite directions -- a slot reads one map string from the chain DSP,
+ * while Master FX has no chain, so the caller assembles the rows from each
+ * position's chain_params plus the host's assignment table.
+ *
+ * `rows` is [{ slot, module, params: [{ key, name, group, cc }] }].
+ */
+export function masterCcMapLevels(rows, chLabel) {
+    const levels = {};
+    const list = Array.isArray(rows) ? rows.filter((r) => r && r.module) : [];
+
+    if (!list.length) {
+        levels.ccmap = { label: "CC Map", knobs: [], params: [],
+                         menu: [{ label: "No Master FX", action: "" }],
+                         menu_label: "CC Map" };
+        return levels;
+    }
+
+    levels.ccmap = {
+        label: "CC Map", knobs: [], params: [],
+        /* The channel Master FX listens on belongs in the header: a CC number
+         * without one is half an address, and unlike a slot this bus has its
+         * own setting (All by default). */
+        menu_label: "CC Map " + (chLabel || ""),
+        menu: list.map((r) => ({
+            label: r.module,
+            value: String((r.params || []).filter((p) => p.cc >= 0).length) +
+                   "/" + (r.params || []).length,
+            level: "mccmap_fx" + r.slot,
+        })),
+    };
+
+    for (const r of list) {
+        const ps = r.params || [];
+        levels["mccmap_fx" + r.slot] = {
+            hidden: true,                 /* opened by its row, not walked to */
+            label: r.module, knobs: [], params: [],
+            menu_label: r.module + " " + (chLabel || ""),
+            menu: ps.length
+                ? ps.map((p, i) => ({
+                      label: (() => {
+                          const nm = prettyName(p.name), gp = prettyName(p.group);
+                          return (gp && nm.toLowerCase().indexOf(gp.toLowerCase()) !== 0)
+                              ? (gp + " " + nm) : nm;
+                      })(),
+                      /* "3 Ch 16", the same shape a slot row uses -- a CC
+                       * number without its channel is half an address, and the
+                       * two buses must read alike. */
+                      value: p.cc >= 0 ? (p.cc + " " + (chLabel || "")) : "--",
+                      action: "mcc_edit:" + r.slot + ":" + i + "|" + p.name,
+                  }))
+                : [{ label: "No parameters", action: "" }],
+        };
+    }
+    return levels;
+}
+
+export function masterGridHierarchy(hasPreset, ccRows, chLabel) {
     const menu = MASTER_GRID_ACTIONS
         .filter((a) => a.always || hasPreset)
         .map((a) => ({ label: a.label, action: a.action }));
@@ -806,6 +885,10 @@ export function masterGridHierarchy(hasPreset) {
     /* The SAME builder the slot contract uses, one bus over. */
     Object.assign(levels, lfoLevels([1, 2], MASTER_KEY_PREFIX));
     levels.actions = { label: "Actions", knobs: [], params: [], menu: menu, menu_label: "Actions" };
+    Object.assign(levels, masterCcMapLevels(ccRows, chLabel));
+    /* After Actions, same as a slot: a level emits straight after the entry
+     * that navigates to it. */
+    levels.root.params.push({ level: "ccmap", label: "CC Map" });
     return { modes: null, levels };
 }
 
@@ -846,7 +929,14 @@ export function createMasterGridIo(io) {
     return {
         getParam(fullKey) {
             const k = bare(fullKey);
-            if (k === "ui_hierarchy") return JSON.stringify(masterGridHierarchy(!!io.hasPreset()));
+            if (k === "ui_hierarchy") {
+                /* Assembled here rather than in the pure builder: it needs a
+                 * read per loaded position plus the host assignment table, and
+                 * ui_hierarchy is fetched on entry, not on the draw path. */
+                return JSON.stringify(masterGridHierarchy(!!io.hasPreset(),
+                    io.ccRows ? io.ccRows() : [],
+                    io.ccChannel ? io.ccChannel() : ""));
+            }
             if (k === "chain_params") return JSON.stringify(allMasterGridParams());
             /* Wire -> option index. A failed read must stay a failed read: the
              * grid distinguishes null from "", and turning either into index 0

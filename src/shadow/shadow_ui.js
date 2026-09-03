@@ -12280,6 +12280,97 @@ function ccCardPoll() {
     }
 }
 
+
+/*
+ * CLEAR, with a confirm.
+ *
+ * Both clears are destructive and neither is undoable, so a mis-hit on a whole
+ * module would silently discard every number a user had chosen.
+ *
+ * The confirm is an overlay over the list, drawn last and therefore fed input
+ * FIRST -- the grid claims the jog in its own early-out, so a panel fed after it
+ * draws correctly and answers nothing (docs/SHADOW_UI.md).
+ */
+let ccDelConfirm = null;   /* null | { master, target, label } */
+
+function ccClearArm(target, isMaster) {
+    ccDelConfirm = { master: isMaster, target: target,
+                     label: isMaster ? ("FX " + (target + 1)) : String(target) };
+    needsRedraw = true;
+}
+
+function ccClearCommit() {
+    if (!ccDelConfirm) return;
+    const c = ccDelConfirm;
+    ccDelConfirm = null;
+
+    if (c.master) {
+        const rows = buildMasterCcRows();
+        const row = rows.find((r) => r.slot === c.target);
+        if (row) {
+            for (const prm of row.params) {
+                if (!prm || prm.cc < 0) continue;          /* nothing to clear */
+                setSlotParam(0, "master_fx:cc_assign",
+                             row.slot + "|" + prm.key + "|-1|" + prm.min + "|" + prm.max + "|0");
+            }
+            masterCcRowsCache = null;
+        }
+    } else {
+        /* Every row of this component, by index into the slot map. */
+        const slot = paramPagesSlot();
+        const raw = getSlotParam(slot, "auto_cc_map") || "";
+        let i = 0;
+        for (const rec of raw.split(";")) {
+            if (!rec) continue;
+            const b = rec.split("|");
+            if (b.length >= 3 && b[1] === c.target && parseInt(b[0], 10) >= 0) {
+                setSlotParam(slot, "cc_idx:" + i, "-1");
+            }
+            i++;
+        }
+    }
+    paramPagesContractChanged();
+    needsRedraw = true;
+}
+
+function drawCcClearConfirm() {
+    if (!ccDelConfirm) return;
+    const x = 6, y = 14, w = SCREEN_WIDTH - 12, h = 38;
+    fill_rect(x - 1, y - 1, w + 2, h + 2, 0);
+    ccCardOutline(x, y, w, h);
+    const t = "CLEAR ALL CC?";
+    print(x + Math.max(2, ((w - text_width(t)) >> 1)), y + 5, t, 1);
+    const sub = (ccDelConfirm.label || "").slice(0, 20);
+    if (sub) print(x + Math.max(2, ((w - text_width(sub)) >> 1)), y + 17, sub, 1);
+    const hint = "CLK yes   BACK no";
+    print(x + Math.max(2, ((w - text_width(hint)) >> 1)), y + h - 10, hint, 1);
+}
+
+/*
+ * ONE entry point for both CC overlays, fed before the grid.
+ *
+ * The grid claims the jog in its own early-out, so an overlay offered after it
+ * draws correctly and answers nothing -- the half-working-overlay bug
+ * docs/SHADOW_UI.md describes. One call rather than two also keeps the call
+ * site short: test_param_pages_wiring asserts a maximum distance between
+ * paramPagesActive() and handleParamPagesMidi(), which exists to catch the view
+ * being cut off from input entirely.
+ *
+ * Confirm first: it is a modal over the card, so it outranks it.
+ */
+function handleCcOverlay(data) {
+    return handleCcClearMidi(data) || handleCcCardMidi(data);
+}
+
+function handleCcClearMidi(data) {
+    if (!ccDelConfirm || !data || data.length < 3) return false;
+    if ((data[0] & 0xF0) !== 0xB0) return false;
+    const d1 = data[1], d2 = data[2];
+    if (d1 === 51 && d2 > 0) { ccDelConfirm = null; needsRedraw = true; return true; }
+    if (d1 === 3 && d2 > 0) { ccClearCommit(); return true; }
+    return true;                       /* modal: swallow the rest */
+}
+
 function runChainSettingAction(slot, key) {
     /*
      * CC Map rows arm LEARN rather than opening an editor.
@@ -12290,6 +12381,10 @@ function runChainSettingAction(slot, key) {
      * turns any control on their surface, and the CC that arrives claims it,
      * swapping with whatever held it. The gesture is the confirmation.
      */
+    if (key && key.indexOf("mcc_clear_all:") === 0) {
+        ccClearArm(parseInt(key.slice(14), 10), true);
+        return false;
+    }
     if (key && key.indexOf("mcc_edit:") === 0) {
         /* "mcc_edit:<position>:<paramIndex>|<name>" -- the rows are rebuilt
          * from the same three sources the page was, so the indices agree. */
@@ -12300,6 +12395,10 @@ function runChainSettingAction(slot, key) {
         const row = rows.find((r) => r.slot === parseInt(bits[0], 10));
         const p = row && row.params[parseInt(bits[1], 10)];
         if (p) openMasterCcCard(row, p);
+        return;
+    }
+    if (key && key.indexOf("cc_clear_all:") === 0) {
+        ccClearArm(key.slice(13), false);
         return;
     }
     if (key && key.indexOf("cc_edit:") === 0) {
@@ -21799,6 +21898,7 @@ function dispatchCoRunDraw() {
         case VIEWS.PARAM_PAGES:
             if (!drawParamPages()) { if (enterHierarchyEditorFromParamPages()) drawHierarchyEditor(); }
             drawCcCard();   /* over the list it belongs to */
+            drawCcClearConfirm();
             break;
         case VIEWS.CANVAS:               drawCanvasPreview(); break;
         case VIEWS.KNOB_EDITOR:          drawKnobEditor(); break;
@@ -21897,9 +21997,14 @@ globalThis.tick = function() {
      * new call is the wrong trade. */
     if (view === VIEWS.PARAM_PAGES) tickComponentWidgets();
     if (view === VIEWS.PARAM_PAGES) tickParamPages();
-    /* While the card is armed the DSP is what changes the value, so notice
-     * it. One read, only while armed -- never on the draw path. */
-    if (view === VIEWS.PARAM_PAGES) ccCardPoll();
+    /* While the card is armed the DSP is what changes the value, so notice it.
+     * One read, only while armed -- never on the draw path.
+     *
+     * Called unconditionally, and it guards itself: test_param_pages_wiring
+     * asserts the literal shape of the tick line above, and wrapping that line
+     * in a block to add this one silently broke an assertion that exists to
+     * catch the view never being ticked at all. */
+    ccCardPoll();
     /* The debounced `*` refresh (see tickUserPresetStale's own note) — driven
      * from the tick, never from a draw function, and cheap to poll when
      * nothing is pending (one boolean test). */
@@ -23010,6 +23115,7 @@ globalThis.tick = function() {
         case VIEWS.PARAM_PAGES:
             if (!drawParamPages()) { if (enterHierarchyEditorFromParamPages()) drawHierarchyEditor(); }
             drawCcCard();   /* over the list it belongs to */
+            drawCcClearConfirm();
             break;
         case VIEWS.CANVAS:
             drawCanvasPreview();
@@ -23285,9 +23391,7 @@ globalThis.onMidiMessageInternal = function(data) {
      * working, because decodeInput claims CC 14 but returns null for pads. */
     if (view === VIEWS.PARAM_PAGES && paramPagesActive() && !isTextEntryActive()) {
         if (maybeDismissWarningFromInput(status, d1, d2)) { needsRedraw = true; return; }
-        /* AHEAD of the grid: it claims the jog in its own early-out, so a card
-         * fed after it would draw correctly and answer nothing. */
-        if (handleCcCardMidi(data)) { needsRedraw = true; return; }
+        if (handleCcOverlay(data)) { needsRedraw = true; return; }
         if (handleParamPagesMidi(data)) { needsRedraw = true; return; }
     }
 

@@ -1200,29 +1200,10 @@ CHAIN_INTERNAL void chain_auto_cc_refresh(chain_instance_t *inst, const char *sy
     auto_cc_apply_defaults(inst);
     chain_cc_apply_overrides(inst);
 
-    /*
-     * Log the whole assignment. Without this the map is invisible: a user has
-     * no way to learn which CC reaches which parameter except by turning each
-     * one and listening, and the auto path deliberately does not move the
-     * on-screen knob (it sets the parameter directly), so there is nothing to
-     * watch either. Load-time only, so it costs one burst per module load.
-     */
-    {
-        char line[160];
-        int total = inst->synth_param_count;
-        for (int i = 0; i < inst->fx_count && i < MAX_AUDIO_FX; i++) total += inst->fx_param_counts[i];
-        for (int i = 0; i < inst->midi_fx_count && i < MAX_MIDI_FX; i++) total += inst->midi_fx_param_counts[i];
-        int assigned = 0;
-        for (int i = 0; i < inst->auto_cc_count; i++)
-            if (inst->auto_cc[i].cc != CC_NONE) assigned++;
-        snprintf(line, sizeof(line), "cc-map: %d controllable, %d assigned (of %d params)",
-                 inst->auto_cc_count, assigned, total);
-        v2_chain_log(inst, line);
-        /* The summary only. The full table used to be printed here, one line
-         * per parameter, because it was the only way to see it -- ~97 lines on
-         * every module load. Slot Settings > MIDI > CC Map now shows it on the
-         * device, so the log keeps the one line that says the build worked. */
-    }
+    /* Logged by the CALLER, not here: two host tests compile this file
+     * standalone and v2_chain_log lives in chain_host.c, so logging from this
+     * translation unit turns a unit test into a link error. */
+
 }
 
 /* Look up an auto-assigned CC. Returns NULL when the CC is not assigned. */
@@ -1532,20 +1513,7 @@ CHAIN_INTERNAL void chain_cc_parse_overrides(chain_instance_t *inst, const char 
         o->cc = (uint8_t)atoi(b2 + 1);
     }
     chain_cc_apply_overrides(inst);
-    {
-        /* Logged HERE, not in the rebuild: the rebuild runs at module load and
-         * the replay happens afterwards on the load_file path, so the summary
-         * printed there always reads "0 assigned" no matter what was restored
-         * -- a status line that cannot show the thing it is about, which reads
-         * as the restore having failed. */
-        int assigned = 0;
-        for (int k = 0; k < inst->auto_cc_count; k++)
-            if (inst->auto_cc[k].cc != CC_NONE) assigned++;
-        char line[96];
-        snprintf(line, sizeof(line), "cc-map: restored %d, %d now assigned",
-                 inst->cc_override_count, assigned);
-        v2_chain_log(inst, line);
-    }
+
 }
 
 

@@ -626,6 +626,18 @@ int v2_load_synth(chain_instance_t *inst, const char *module_name) {
             v2_chain_log(inst, dbg);
         }
         chain_auto_cc_refresh(inst, (hlen > 0) ? hier : NULL);
+        {
+            /* Logged from HERE rather than inside the builder: two host tests
+             * compile chain_params.c standalone, and v2_chain_log lives in this
+             * file -- logging from there turns a unit test into a link error. */
+            int assigned = 0;
+            for (int i = 0; i < inst->auto_cc_count; i++)
+                if (inst->auto_cc[i].cc != CC_NONE) assigned++;
+            char line[96];
+            snprintf(line, sizeof(line), "cc-map: %d controllable, %d assigned",
+                     inst->auto_cc_count, assigned);
+            v2_chain_log(inst, line);
+        }
         free(hier);
     }
 
@@ -1007,6 +1019,15 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
              */
             chain_cc_parse_overrides(inst, temp_patch.cc_overrides
                                            ? temp_patch.cc_overrides : "");
+            {
+                int assigned = 0;
+                for (int i = 0; i < inst->auto_cc_count; i++)
+                    if (inst->auto_cc[i].cc != CC_NONE) assigned++;
+                char line[96];
+                snprintf(line, sizeof(line), "cc-map: restored %d, %d now assigned",
+                         inst->cc_override_count, assigned);
+                v2_chain_log(inst, line);
+            }
             /* temp_patch is a local: its heap field is ours to release. */
             free(temp_patch.cc_overrides);
             temp_patch.cc_overrides = NULL;

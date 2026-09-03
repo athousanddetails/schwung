@@ -13709,7 +13709,8 @@ function componentEntryReader(slotIndex, componentKey, mfxIndex) {
 function openComponentEditor(slotIndex, componentKey, mfxIndex) {
     const decision = decideComponentEntry(
         componentEntryReader(slotIndex, componentKey, mfxIndex),
-        (json) => { try { return JSON.parse(json); } catch (e) { return null; } });
+        (json) => { try { return JSON.parse(json); } catch (e) { return null; } },
+        holdAttemptsFor(slotIndex, componentKey, mfxIndex));
 
     if (decision.action === ENTRY_HOLD) {
         holdForComponentLoad(slotIndex, componentKey, mfxIndex, decision.reason);
@@ -13729,6 +13730,15 @@ function openComponentEditor(slotIndex, componentKey, mfxIndex) {
      * module selection is still available". */
     if (mfxIndex >= 0) return;
     enterComponentEditFallback(slotIndex, componentKey);
+}
+
+/* How many probes the CURRENT hold has already made for this position -- 0 on
+ * a fresh entry or for any other position. What lets the gate tell "not yet"
+ * from "never" (HOLD_UNSERVED_READ_LIMIT). */
+function holdAttemptsFor(slotIndex, componentKey, mfxIndex) {
+    const h = componentLoadHold;
+    return (h && h.slot === slotIndex && h.componentKey === componentKey && h.mfxIndex === mfxIndex)
+        ? h.attempts : 0;
 }
 
 function componentLoadHoldLabel() {

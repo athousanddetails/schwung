@@ -791,6 +791,32 @@ void v2_on_midi(void *instance, const uint8_t *msg, int len, int source) {
     /* Handle knob CC mappings */
     if (len >= 3 && (msg[0] & 0xF0) == 0xB0) {
         uint8_t cc = msg[1];
+        /*
+         * LEARN: the UI armed a parameter, so the next CC claims it.
+         *
+         * Ahead of EVERY other CC block, including the two knob ranges, and it
+         * CONSUMES the message. Two reasons it sits this high. The CC being
+         * taught almost certainly already drives something, and moving that
+         * parameter on the way past would be a surprise edit. And a reserved
+         * number has to reach the reject below to be reported -- behind the
+         * knob blocks, turning a 71-78 or 102-109 encoder while armed produced
+         * silence, which is indistinguishable from the controller not being
+         * heard at all.
+         */
+        if (inst->cc_control && inst->cc_learn_target[0]) {
+            if (chain_cc_reserved((int)cc)) {
+                /* Stay armed and report the number: refusing in silence looks
+                 * exactly like the controller not being heard, which is the
+                 * failure this whole path exists to make visible. */
+                inst->cc_learn_reject = (int)cc;
+                return;
+            }
+            chain_cc_assign(inst, inst->cc_learn_target, inst->cc_learn_param, (int)cc);
+            inst->cc_learn_target[0] = '\0';
+            inst->cc_learn_param[0] = '\0';
+            return;
+        }
+
         if (cc >= KNOB_CC_START && cc <= KNOB_CC_END) {
             for (int i = 0; i < inst->knob_mapping_count; i++) {
                 if (inst->knob_mappings[i].cc == cc) {
@@ -907,15 +933,7 @@ void v2_on_midi(void *instance, const uint8_t *msg, int len, int source) {
                     return;
                 }
             }
-            /*
-             * Unmapped 102-109 used to be swallowed here. With no knob
-             * mappings at all the range is dead, and the auto map is allowed
-             * to claim it (see AUTO_CC_KNOB_SPILL) -- so fall through in that
-             * case instead of eating the CC. When knobs ARE mapped the range
-             * belongs to them and is still consumed, forwarded to nothing,
-             * exactly as before.
-             */
-            if (inst->knob_mapping_count > 0) return;
+            return;  /* CC 102-109 consumed even if unmapped -- don't forward to synth */
         }
 
         /*
@@ -931,27 +949,6 @@ void v2_on_midi(void *instance, const uint8_t *msg, int len, int source) {
          * its own output would fight the user mid-turn, the same reasoning the
          * absolute knob block records.
          */
-        /*
-         * LEARN: the UI armed a parameter, so the next external CC claims it.
-         *
-         * Ahead of the normal lookup, and it CONSUMES the message: the CC the
-         * user is teaching almost certainly already drives something else, and
-         * moving that parameter on the way past would be a surprise edit.
-         */
-        if (inst->cc_control && inst->cc_learn_target[0]) {
-            if (chain_cc_reserved((int)cc)) {
-                /* Stay armed and report the number: refusing in silence looks
-                 * exactly like the controller not being heard, which is the
-                 * failure this whole path exists to make visible. */
-                inst->cc_learn_reject = (int)cc;
-                return;
-            }
-            chain_cc_assign(inst, inst->cc_learn_target, inst->cc_learn_param, (int)cc);
-            inst->cc_learn_target[0] = '\0';
-            inst->cc_learn_param[0] = '\0';
-            return;
-        }
-
         if (inst->cc_control) {
             auto_cc_t *a = chain_auto_cc_find(inst, cc);
             if (a && chain_cc_component_enabled(inst, a->target)) {

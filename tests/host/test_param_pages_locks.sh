@@ -208,6 +208,118 @@ Promise.all([
     if (slotCtl.heldStep !== -1) fail("a synthesised contract took a held step");
   }
 
-  console.log("PASS: parameter-lock decorations are honoured in every layout, and the gesture writes locks, never the base");
+  /* ---- the automation mark, and the value that moves ----
+   *
+   * A lock on step 9 drives its parameter for one sixteenth in every bar, so a
+   * mark that followed `modulated` would blink once a bar and read as a
+   * glitch. `hasLocks` is the standing fact — mask != 0 — and the cell shows
+   * the DRIVEN value, because a knob frozen at the base while the sound
+   * changes under it reads as the feature not working. */
+  {
+    const dev = D.createFakeDevice({ id: "obxd" });
+    let locked = false;
+    const effective = "0.9";
+    let bareKey = null;
+    /* The index comes from lock_config in ONE read — not a mask per key on the
+     * value cursor, which doubled the grid read rate and broke the
+     * one-round-trip-per-tick budget four other tests pin. */
+    const io = Object.assign({}, dev, {
+      getParam: (k) => {
+        if (k === "lock_config") {
+          return JSON.stringify({ pattern_len: 16, rate_div: 23, lanes: locked && bareKey
+            ? [{ target: "synth", param: bareKey, steps: [[8, 0.25]] }] : [] });
+        }
+        if (/:effective$/.test(k)) return effective;
+        if (/^lock:at:/.test(k)) return "{}";
+        return dev.getParam(k);
+      },
+    });
+    const ctl = C.createController(io);
+    ctl.load({ slot: 0, component: "synth", prefix: "synth" });
+    ctl.setLayout(C.LAYOUT_MOVY);
+    for (let i = 0; i < 64; i++) ctl.tick();
+    const key = ctl.page && ctl.page.keys && ctl.page.keys[0];
+    if (!key) fail("fixture has no knob page");
+    bareKey = key;
+
+    if (ctl.state.lockCache[key]) fail("a parameter with no lanes must not be marked");
+
+    locked = true;
+    /* A page change re-derives the index — one read, off the cursor. */
+    const home = ctl.pageIndex;
+    ctl.goToPage(home === 0 ? 1 : 0); for (let i = 0; i < 40; i++) ctl.tick();
+    ctl.goToPage(home);               for (let i = 0; i < 40; i++) ctl.tick();
+    if (!ctl.state.lockCache[key]) fail("a parameter holding a lock is not marked as automated");
+    /* And its cell reads the DRIVEN value, not the base: `:effective` replaces
+     * the base read rather than adding one, so the cursor still spends exactly
+     * one round trip per tick. */
+    if (String(ctl.state.values[key]) !== effective) {
+      fail("a locked parameter shows " + ctl.state.values[key] + ", not the driven value " + effective);
+    }
+
+    /* The mark must reach the renderer, and must not be the held-step mark. */
+    const fb = H.createFramebuffer();
+    ctl.render(H.drawContext(fb), { title: "S1 > OBXD" });
+    const marked = fb.toAscii();
+    locked = false;
+    ctl.goToPage(home === 0 ? 1 : 0); for (let i = 0; i < 40; i++) ctl.tick();
+    ctl.goToPage(home);               for (let i = 0; i < 40; i++) ctl.tick();
+    const fb2 = H.createFramebuffer();
+    ctl.render(H.drawContext(fb2), { title: "S1 > OBXD" });
+    if (marked === fb2.toAscii()) fail("the automation mark never reaches the screen");
+  }
+
+  /* ---- master bus: the same gesture, the other engine ----
+   *
+   * The master grid is a synthesised contract whose keys carry their own
+   * master_fx: prefix; its locks live on the master engine and address targets
+   * as "fx1:mix". Getting that mapping wrong is silent — writes land on a key
+   * nobody serves — so it is pinned here rather than discovered on hardware. */
+  {
+    const writes = [];
+    const io = {
+      getParam: (k) => {
+        if (k === "master_settings:ui_hierarchy") {
+          return JSON.stringify({ modes: null, levels: { root: {
+            label: "Master", knobs: ["master_fx:fx1:mix"],
+            params: [{ key: "master_fx:fx1:mix" }] } } });
+        }
+        if (k === "master_settings:chain_params") {
+          return JSON.stringify([{ key: "master_fx:fx1:mix", name: "Mix",
+                                   type: "float", min: 0, max: 1, step: 0.01 }]);
+        }
+        if (/master_fx:lock:at:/.test(k)) return JSON.stringify({ "fx1:mix": 0.25 });
+        if (/master_fx:lock_config/.test(k)) {
+          return JSON.stringify({ lanes: [{ target: "fx1", param: "mix", steps: [[9, 0.25]] }] });
+        }
+        return "0.5";
+      },
+      setParam: (k, v) => writes.push([k, String(v)]),
+    };
+    const ctl = C.createController(io);
+    ctl.load({ slot: 0, component: "master_settings", prefix: "master_settings" });
+    ctl.setLayout(C.LAYOUT_MOVY);
+    for (let i = 0; i < 32; i++) ctl.tick();
+
+    if (ctl.onStepButton(9, true) !== true) fail("master must accept a held step");
+    const dec = ctl.state.decorations;
+    if (!dec || !dec[0] || !dec[0].locked || Number(dec[0].value) !== 0.25) {
+      fail("master step-down did not decorate from master_fx:lock:at — the key mapping is wrong");
+    }
+
+    const n = writes.length;
+    ctl.onKnobTurn(0, 1, 500000);
+    const lockWrites = writes.slice(n).filter(([k]) => /lock:set$/.test(k));
+    if (lockWrites.length !== 1) fail("a master detent must write exactly one lock:set");
+    const [lk, lv] = lockWrites[0];
+    if (lk !== "master_settings:master_fx:lock:set") fail("master lock write went to " + lk);
+    if (!lv.startsWith("fx1:mix:9:")) fail("master lock is addressed as " + lv + ", not fx1:mix:9:<value>");
+    if (writes.slice(n).some(([k]) => k === "master_settings:master_fx:fx1:mix")) {
+      fail("a master detent while a step is held wrote the base value");
+    }
+    ctl.onStepButton(9, false);
+  }
+
+  console.log("PASS: lock decorations, the automation mark, the driven value, and the same gesture on both buses");
 }).catch((e) => { console.log("FAIL: " + (e && e.stack || e)); process.exit(1); });
 '

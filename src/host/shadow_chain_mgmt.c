@@ -2674,6 +2674,12 @@ void shadow_master_fx_lock_clear_all(void) {
     memset(mfx_lock_base_valid, 0, sizeof(mfx_lock_base_valid));
 }
 
+/* Move's Record button, on the master bus. Same toggle the chain does for a
+ * slot; kept here because shadow_master_fx_locks is this file's state. */
+void shadow_master_fx_lock_toggle_rec(void) {
+    shadow_master_fx_locks.rec = shadow_master_fx_locks.rec ? 0 : 1;
+}
+
 void shadow_master_fx_lock_tick(void) {
     lock_state_t *st = &shadow_master_fx_locks;
     if (st->lane_count <= 0 && !st->rec) return;

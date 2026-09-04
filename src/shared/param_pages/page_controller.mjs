@@ -623,6 +623,10 @@ export function createController(io = {}) {
         heldStep: -1,
         lockValues: null,
         pendingLockStep: Object.create(null),
+        /* key -> does this parameter hold a lock on ANY step. Refreshed on the
+         * value cursor, like modCache, so the mark costs one read per tick
+         * rather than one per cell per draw. */
+        lockCache: Object.create(null),
         /* the caller acts on these; the controller never opens a screen itself */
         pending: null,
         /* Page picker: the answer to 76 pages. Open, jog to scroll, click to
@@ -830,9 +834,43 @@ export function createController(io = {}) {
     /* Only a chain component carries locks. A synthesised contract — slot
      * settings, Master FX settings — addresses `slot:*` or `master_fx:*` and
      * has no lanes behind it, so a held step must not swallow its edits. */
+    /* TWO BUSES, ONE ENGINE.
+     *
+     * A chain component (`synth`, `fxN`, `midi_fxN`) writes `lock:*` on its
+     * slot. The Master FX settings grid is a synthesised contract whose keys
+     * already carry their own `master_fx:` prefix and whose engine lives on the
+     * master bus — so the same gesture writes `master_fx:lock:*` and addresses
+     * its targets as `fx1:mix`, not `master_settings:master_fx:fx1:mix`.
+     *
+     * Everything else — the held step, the throttle tagging, the decorations —
+     * is identical, which is the point: one editor, two buses. The SLOT
+     * settings grid (prefix `slot`) stays excluded: it addresses `slot:*`,
+     * which has no lanes behind it. */
+    const MASTER_PREFIX = "master_settings";
+    const MASTER_KEY_RE = /^master_fx:(fx\d+|midi_fx\d*):(.+)$/;
+
+    function isMasterBus() { return (s.prefix || "") === MASTER_PREFIX; }
+
     function lockablePrefix() {
         const p = s.prefix || "";
-        return p === "synth" || /^fx\d+$/.test(p) || /^midi_fx\d*$/.test(p);
+        return p === "synth" || /^fx\d+$/.test(p) || /^midi_fx\d*$/.test(p) || p === MASTER_PREFIX;
+    }
+
+    /* The ENGINE's address for a page key: "synth:cutoff" on a slot, "fx1:mix"
+     * on master. null when this page's keys are not lockable. */
+    function lockTargetFor(key, pg) {
+        if (!key) return null;
+        if (isMasterBus()) {
+            const m = MASTER_KEY_RE.exec(childResolve(key, pg));
+            return m ? `${m[1]}:${m[2]}` : null;
+        }
+        return lockablePrefix() ? fullKey(key, pg) : null;
+    }
+
+    /* Where lock:* is written and read for this bus. The master io strips its
+     * own leading segment, so what it forwards is `master_fx:lock:…`. */
+    function lockKey(sub) {
+        return isMasterBus() ? `${MASTER_PREFIX}:master_fx:lock:${sub}` : `lock:${sub}`;
     }
 
     function heldLockStep() {
@@ -843,13 +881,50 @@ export function createController(io = {}) {
      * step as {"synth:key": value, ...}. */
     function readLocksAt(step) {
         let json = null;
-        try { json = getParam(`lock:at:${step}`); } catch (e) { json = null; }
+        try { json = getParam(lockKey(`at:${step}`)); } catch (e) { json = null; }
         if (!json) return {};
         try {
             const o = JSON.parse(json);
             return (o && typeof o === "object") ? o : {};
         } catch (e) {
             return {};
+        }
+    }
+
+    /* WHICH PARAMETERS HOLD A LOCK — read ONCE, not per key and not per tick.
+     *
+     * The obvious version asked the engine for each key's step mask on the
+     * value cursor, beside the modulation flag. That doubled the grid's read
+     * rate: the cursor's budget is ONE round trip per tick (a param read is
+     * ~2.8 ms against a 1.68 ms whole-page render), and four separate tests
+     * pin it. `lock_config` answers the whole picture in a single read, and
+     * the picture only changes when a lock is written — which this controller
+     * does itself, or which arrives with a new contract.
+     *
+     * Cost: one read per rebuild, plus one after a lock write, when the user
+     * is mid-gesture and a round trip is affordable. Zero per tick. */
+    function refreshLockIndex() {
+        for (const k in s.lockCache) delete s.lockCache[k];
+        let json = null;
+        try { json = getParam(isMasterBus() ? `${MASTER_PREFIX}:master_fx:lock_config` : "lock_config"); }
+        catch (e) { json = null; }
+        if (!json) return;
+
+        let cfg = null;
+        try { cfg = JSON.parse(json); } catch (e) { return; }
+        if (!cfg || !Array.isArray(cfg.lanes)) return;
+
+        const held = Object.create(null);
+        for (const lane of cfg.lanes) {
+            if (!lane || !lane.target || !lane.param) continue;
+            if (!Array.isArray(lane.steps) || !lane.steps.length) continue;
+            held[`${lane.target}:${lane.param}`] = true;
+        }
+        const pg = page();
+        for (const k of ((pg && pg.keys) || [])) {
+            if (!k) continue;
+            const addr = lockTargetFor(k, pg);
+            if (addr && held[addr]) s.lockCache[k] = true;
         }
     }
 
@@ -861,14 +936,16 @@ export function createController(io = {}) {
      * step the write was ENQUEUED against, which is what keeps a throttled
      * detent from the moment before a release from landing on the base. */
     function writeParam(key, wire, step) {
-        const fk = fullKey(key);
         const target = (step === undefined) ? heldLockStep() : step;
         if (target >= 0) {
-            /* "<target>:<param>:<step>:<value>" — fk is already the first two. */
-            setParam("lock:set", `${fk}:${target}:${wire}`);
-            return true;
+            const addr = lockTargetFor(key);
+            if (addr) {
+                /* "<target>:<param>:<step>:<value>" */
+                setParam(lockKey("set"), `${addr}:${target}:${wire}`);
+                return true;
+            }
         }
-        setParam(fk, wire);
+        setParam(fullKey(key), wire);
         return false;
     }
 
@@ -877,6 +954,8 @@ export function createController(io = {}) {
         const step = (s.pendingLockStep[key] === undefined) ? LOCK_STEP_NONE : s.pendingLockStep[key];
         const locked = writeParam(key, s.pendingWrite[key], step);
         delete s.pendingLockStep[key];
+        /* A write that CREATED a lock has to show its mark at once. */
+        if (locked && !s.lockCache[key]) s.lockCache[key] = true;
         /* A lock does not move the base, so it cannot change what visible_if
          * would have shown — no re-plan. */
         if (!locked) replanIfCondition(key);
@@ -1090,6 +1169,8 @@ export function createController(io = {}) {
             s.lastWriteMs = Object.create(null);
             s.pendingWrite = Object.create(null);
         s.pendingLockStep = Object.create(null);
+        s.lockCache = Object.create(null);
+        s.lockIndexDue = true;
             return true;
         }
         s.contractUnresolved = false;
@@ -1180,6 +1261,8 @@ export function createController(io = {}) {
         s.lastWriteMs = Object.create(null);
         s.pendingWrite = Object.create(null);
         s.pendingLockStep = Object.create(null);
+        s.lockCache = Object.create(null);
+        s.lockIndexDue = true;
         /* A rebuild after a module finishes loading shifts every index, so land
          * by name rather than by position; a first load lands on a grid. */
         s.pageIndex = oldPages.length ? reanchor(oldPages, oldIndex, s.pages) : firstGrid(s.pages);
@@ -1232,6 +1315,8 @@ export function createController(io = {}) {
         s.knobStates = Object.create(null);
         s.pendingWrite = Object.create(null);
         s.pendingLockStep = Object.create(null);
+        s.lockCache = Object.create(null);
+        s.lockIndexDue = true;
         warmCurrentPage();
     }
 
@@ -2096,6 +2181,14 @@ export function createController(io = {}) {
         flushDueWrites();
         expireTurnClaim();
 
+        /* The lock index costs one read and is due only after a rebuild or a
+         * page change. It is spent INSTEAD OF this tick's cursor stop, never
+         * on top of it: the cursor's one-round-trip-per-tick budget is a
+         * measured contract (a read is ~2.8 ms against a 1.68 ms render) and
+         * four tests pin it. One tick's value refresh arrives a beat later;
+         * nothing else changes. */
+        if (s.lockIndexDue && s.pages.length && maybeRefreshLockIndex()) return;
+
         /*
          * Re-try an unresolved contract BEFORE the page guards below: an
          * unresolved first load leaves no page at all, so anything hung off the
@@ -2302,7 +2395,17 @@ export function createController(io = {}) {
          * while a target is active, so fall back rather than blank the knob if
          * the flag and the target ever disagree. */
         let raw = null;
-        if (s.modCache[key]) raw = getParam(fullKey(key) + ":base");
+        /* A LOCKED PARAMETER SHOWS WHAT IT IS PLAYING.
+         *
+         * That is the point of watching a knob during playback: the value
+         * jumps step to step, and a cell frozen at the base while the sound
+         * changes underneath reads as the feature not working. `:effective` is
+         * the driven value and falls back to the plain reading when nothing is
+         * driving, so this REPLACES the base read rather than adding one — the
+         * cursor still spends exactly one round trip per tick, which is the
+         * budget four other tests pin. */
+        if (s.lockCache[key]) raw = getParam(fullKey(key) + ":effective");
+        else if (s.modCache[key]) raw = getParam(fullKey(key) + ":base");
         /*
          * "" counts as a MISS, not as a value.
          *
@@ -3122,6 +3225,9 @@ export function createController(io = {}) {
      * and only the last is news.
      */
     function goToPage(index, { remember = true, enterIfDoor = false } = {}) {
+        /* A different page is a different eight keys, so the marks are a
+         * different eight. Booked, not read here — see tick(). */
+        if (index !== s.pageIndex) s.lockIndexDue = true;
         /* Paging away cannot leave a menu entered — returning later would
          * silently hand the jog back to the list. (Page names are unique, so
          * this and "any index change" are the same rule; onJog carries the
@@ -3271,7 +3377,7 @@ export function createController(io = {}) {
             /* While a step is held the knob starts from THAT STEP's value when
              * it has one — you are turning the lock, not the sound underneath. */
             if (heldLockStep() >= 0 && s.lockValues) {
-                const lv = s.lockValues[fullKey(key)];
+                const lv = s.lockValues[lockTargetFor(key)];
                 if (lv !== undefined && lv !== null) raw = lv;
             }
             if (raw === undefined) {
@@ -3356,7 +3462,8 @@ export function createController(io = {}) {
             /* The BASE does not move. The lock is what changed, and the cell
              * shows it through the decoration — updated here, on the detent,
              * so it never waits for the throttled write behind it. */
-            if (s.lockValues) { s.lockValues[fullKey(key)] = wire; applyLocks(); }
+            const addr = lockTargetFor(key);
+            if (s.lockValues && addr) { s.lockValues[addr] = wire; applyLocks(); }
         } else {
             s.values[key] = wire;
             s.settleUntil[key] = s.tickCount + SETTLE_TICKS;
@@ -3371,7 +3478,8 @@ export function createController(io = {}) {
             s.lastWriteMs[key] = t;
             delete s.pendingWrite[key];
             delete s.pendingLockStep[key];
-            if (!writeParam(key, wire, lockStep)) replanIfCondition(key);
+            if (writeParam(key, wire, lockStep)) s.lockCache[key] = true;
+            else replanIfCondition(key);
         } else {
             s.pendingWrite[key] = wire;
             if (lockStep >= 0) s.pendingLockStep[key] = lockStep;
@@ -3420,7 +3528,8 @@ export function createController(io = {}) {
         const wire = enumWireValue(meta, i);
         const lockStep = heldLockStep();
         if (lockStep >= 0) {
-            if (s.lockValues) { s.lockValues[fullKey(key)] = wire; applyLocks(); }
+            const addr = lockTargetFor(key);
+            if (s.lockValues && addr) { s.lockValues[addr] = wire; applyLocks(); }
         } else {
             s.values[key] = wire;
             s.settleUntil[key] = s.tickCount + SETTLE_TICKS;
@@ -3870,10 +3979,29 @@ export function createController(io = {}) {
      * Skips a key that is being turned, for the same reason the value cursor
      * does (`settleUntil`): a read issued before the turn lands after it.
      */
+    /* One read, on the tick after a rebuild or a page change — never inside
+     * the cursor's per-tick budget. */
+    function maybeRefreshLockIndex() {
+        if (!s.lockIndexDue) return false;
+        /* Only spend the read once there is a page to apply it to. A load
+         * re-resolves the contract over several ticks, and a one-shot refresh
+         * that fired against an empty page set would clear the flag having
+         * marked nothing — the marks would then never appear at all. */
+        const pg = page();
+        if (!pg || !Array.isArray(pg.keys) || !pg.keys.some(Boolean)) return false;
+        s.lockIndexDue = false;
+        refreshLockIndex();
+        return true;
+    }
+
     function refreshModulatedValues(p) {
         const modKeys = [];
         for (const k of p.keys) {
-            if (k && s.modCache[k]) modKeys.push(k);
+            /* A LOCKED key joins this lane, which is what makes its cell move
+             * during playback without costing the value cursor a read: the
+             * lane already exists, is already budgeted, and already fetches
+             * exactly the driven value a lock produces. */
+            if (k && (s.modCache[k] || s.lockCache[k])) modKeys.push(k);
         }
         if (!modKeys.length) {
             /* Nothing modulated: drop stale dots rather than leave them frozen
@@ -3936,8 +4064,9 @@ export function createController(io = {}) {
         for (let i = 0; i < keys.length; i++) {
             const k = keys[i];
             if (!k) { dec[i] = null; continue; }
-            const fk = fullKey(k, pg);
-            if (Object.prototype.hasOwnProperty.call(byFullKey, fk)) {
+            /* The ENGINE's address, not the page's — they differ on master. */
+            const fk = lockTargetFor(k, pg);
+            if (fk && Object.prototype.hasOwnProperty.call(byFullKey, fk)) {
                 dec[i] = { locked: true, value: byFullKey[fk] };
                 any = true;
             } else {
@@ -4066,6 +4195,8 @@ export function createController(io = {}) {
                  * the header is following. */
                 touchedSlots: s.hintLines ? [] : s.touchOrder,
                 modulated: (key) => !!s.modCache[key],
+                /* "this parameter has automation" — steady, unlike modulated. */
+                hasLocks: (key) => !!s.lockCache[key],
                 modValues: s.modValues,
                 decorations: s.decorations,
                 pageGroups: pageGroups(),
@@ -4244,6 +4375,7 @@ export function createController(io = {}) {
             touched: s.touched, decorations: s.decorations,
             layout: s.layout, revealValues: s.revealValues, rect,
             modulated: (key) => !!s.modCache[key],
+            hasLocks: (key) => !!s.lockCache[key],
             /* Section ids for the page rule, so it groups the way Shift+jog
              * navigates. Cached — it only changes when the page set does. */
             pageGroups: pageGroups(),

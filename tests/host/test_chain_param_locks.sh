@@ -132,16 +132,42 @@ if rg -q '"rec"' "$common"; then
   exit 1
 fi
 # Move's Record button arms it, in the shim, so a module-owned grid gets it too.
-if ! rg -n 'd1 == 118 && d2 > 0' -A12 src/schwung_shim.c | rg -q '"lock:rec"'; then
+if ! rg -n 'd1 == 118 && d2 > 0' -A22 src/schwung_shim.c | rg -q '"lock:rec"'; then
   echo "FAIL: Record (CC 118) does not toggle lock:rec on the focused slot" >&2
+  exit 1
+fi
+# ...and the MASTER bus, on the same button, when master is the focused screen.
+if ! rg -n 'd1 == 118 && d2 > 0' -A8 src/schwung_shim.c | rg -q 'shadow_master_fx_lock_toggle_rec\(\)'; then
+  echo "FAIL: Record does not arm the master engine while master is focused" >&2
+  exit 1
+fi
+# The master step claim belongs at the routing decision, NOT inside
+# shadow_master_fx_captures_note — that predicate answers "did a loaded module
+# ask for this", and test_master_fx_permute guards it against a blanket yes.
+if rg -n 'int shadow_master_fx_captures_note' -A4 src/host/shadow_chain_mgmt.c | rg -q 'CAPTURE_STEPS_NOTE_MIN'; then
+  echo "FAIL: the master step claim widened the module-declaration predicate" >&2
+  exit 1
+fi
+if ! rg -n 'slot == SHADOW_CHAIN_INSTANCES' -A18 src/host/shadow_midi.c | rg -q 'note >= CAPTURE_STEPS_NOTE_MIN && note <= CAPTURE_STEPS_NOTE_MAX'; then
+  echo "FAIL: master does not claim the step buttons while it is the focused screen" >&2
   exit 1
 fi
 
 # --- the settings page ------------------------------------------------------
 grid="src/shadow/shadow_ui_slot_grid.mjs"
-for k in '"enabled"' '"rec"' '"pattern_len"' '"rate_div"'; do
+# Steps and Rate ONLY: locks are always live (an empty lane already means off)
+# and recording is armed by the RECORD button, not by a menu toggle. Both keys
+# still exist on the engine for tests and the web panel — they are just not
+# questions the user is made to answer.
+for k in '"pattern_len"' '"rate_div"'; do
   if ! rg -n 'export function lockParams' -A14 "$grid" | rg -q "k\($k\)"; then
     echo "FAIL: Locks page is missing lock:$k" >&2
+    exit 1
+  fi
+done
+for k in '"enabled"' '"rec"'; do
+  if rg -n 'export function lockParams' -A14 "$grid" | rg -q "k\($k\)"; then
+    echo "FAIL: lock:$k is on the Locks page — it should be automatic, not a toggle" >&2
     exit 1
   fi
 done

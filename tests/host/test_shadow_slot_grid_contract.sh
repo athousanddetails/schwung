@@ -70,9 +70,9 @@ function makeSlot(over) {
   /*
    * Main, LFO 1, LFO 2, Locks, Actions. Each LFO is exactly ONE page: nine
    * params would chunk to 8 + 1 and put an orphan page holding a single
-   * control between LFO 1 and LFO 2. Locks is one page of its four settings
-   * (on/off, rec, steps, rate) — fewer than eight, and deliberately not padded
-   * with readouts to fill the grid.
+   * control between LFO 1 and LFO 2. Locks is one page of the two settings
+   * that cannot be inferred — steps and rate — deliberately not padded with
+   * readouts to fill the grid.
    */
   if (grids.length !== 4) fail("expected 4 grid pages (Main + two LFOs + Locks), got " + grids.length);
   if (menus.length !== 1) fail("expected one actions menu page, got " + menus.length);
@@ -87,7 +87,7 @@ function makeSlot(over) {
     fail("page order should be " + order.join(" / ") + ", got " + names.join(" / "));
   }
   for (const g of grids) {
-    const want = g.name === "Locks" ? 4 : 8;
+    const want = g.name === "Locks" ? 2 : 8;
     if ((g.keys || []).length !== want) {
       fail("page " + JSON.stringify(g.name) + " should hold " + want + " knobs, got " + (g.keys || []).length);
     }
@@ -95,7 +95,11 @@ function makeSlot(over) {
   /* The Locks page holds exactly its declared params, in declared order —
    * the same rule the master values page is held to. */
   const locksPage = grids.find((g) => g.name === "Locks");
-  const wantLocks = ["lock:enabled", "lock:rec", "lock:pattern_len", "lock:rate_div"];
+  /* Steps and Rate ONLY. Locks are always live — an empty lane already means
+   * "off" — and recording is armed by the RECORD button, not by a menu
+   * toggle. What is left is the pair that cannot be inferred from anything
+   * Move tells us. */
+  const wantLocks = ["lock:pattern_len", "lock:rate_div"];
   if (!locksPage || (locksPage.keys || []).join("|") !== wantLocks.join("|")) {
     fail("Locks page keys should be " + wantLocks.join(" / ") + ", got " + ((locksPage && locksPage.keys) || []).join(" / "));
   }

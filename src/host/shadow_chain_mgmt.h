@@ -170,6 +170,8 @@ void shadow_master_fx_lfo_tick(int frames);
  * on the same clock. Ticked once per block from the shim, beside the LFOs. */
 extern lock_state_t shadow_master_fx_locks;
 void shadow_master_fx_lock_tick(void);
+/* Toggle master lock recording (Move's Record button while master is focused). */
+void shadow_master_fx_lock_toggle_rec(void);
 /* Live recording: a master param was written by the user. Records it onto the
  * playing step when rec is armed. Target is "fx1".."fxN" by master position. */
 void shadow_master_fx_lock_record(int mfx_slot, const char *param, const char *value);

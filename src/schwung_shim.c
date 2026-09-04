@@ -8611,11 +8611,17 @@ static void shim_post_transfer(void *ctx, uint8_t *shadow, const uint8_t *hw, in
                  * while a module draws its own grid. The chain drops the flag
                  * when the transport stops, so the two cannot drift for long.
                  * The press still reaches Move: nothing here swallows it. */
-                if (d1 == 118 && d2 > 0 && shadow_control && shadow_plugin_v2 &&
-                    shadow_plugin_v2->set_param && shadow_plugin_v2->get_param) {
+                if (d1 == 118 && d2 > 0 && shadow_control) {
                     int slot = shadow_control->ui_slot;
-                    if (slot >= 0 && slot < SHADOW_CHAIN_INSTANCES &&
-                        shadow_chain_slots[slot].active && shadow_chain_slots[slot].instance) {
+                    if (slot == SHADOW_CHAIN_INSTANCES) {
+                        /* Master focused: arm the master engine. Same button,
+                         * same meaning, the bus the user is looking at. */
+                        shadow_master_fx_lock_toggle_rec();
+                    } else if (slot >= 0 && slot < SHADOW_CHAIN_INSTANCES &&
+                               shadow_plugin_v2 && shadow_plugin_v2->set_param &&
+                               shadow_plugin_v2->get_param &&
+                               shadow_chain_slots[slot].active &&
+                               shadow_chain_slots[slot].instance) {
                         char cur[8] = "0";
                         int n = shadow_plugin_v2->get_param(shadow_chain_slots[slot].instance,
                                                             "lock:rec", cur, sizeof(cur));

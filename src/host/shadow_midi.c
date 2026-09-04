@@ -1318,6 +1318,21 @@ int shadow_focused_captures_note(uint8_t note)
 
     int slot = shadow_control->ui_slot;
     if (slot == SHADOW_CHAIN_INSTANCES) {
+        /* THE STEP BUTTONS ARE MASTER'S WHILE MASTER IS FOCUSED.
+         *
+         * Parameter locks need a held step, and the master bus has no patch to
+         * declare `capture: {groups:["steps"]}` in — its modules are audio FX
+         * that know nothing about a sequencer. So the claim is made HERE, at
+         * the routing decision, and not by widening
+         * shadow_master_fx_captures_note: that predicate answers "did a loaded
+         * MODULE ask for this control", a different question, and a test
+         * rightly guards it against becoming a blanket yes.
+         *
+         * Scoped to the one screen where holding a step means something —
+         * this branch is only reached on ui_slot == SHADOW_CHAIN_INSTANCES —
+         * so Move keeps its steps everywhere else. Same trade a slot patch
+         * makes by opting in. */
+        if (note >= CAPTURE_STEPS_NOTE_MIN && note <= CAPTURE_STEPS_NOTE_MAX) return 1;
         return shadow_master_fx_captures_note(note);
     }
     if (slot >= 0 && slot < SHADOW_CHAIN_INSTANCES) {

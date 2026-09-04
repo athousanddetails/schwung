@@ -75,8 +75,15 @@ fi
 # EVERY write passes through one chokepoint. A detent, a throttled flush, an
 # enum commit: none may reach setParam(fullKey(...)) directly, or that path
 # forgets a step is held.
-if rg -q 'setParam\(fullKey\(key\), (wire|s\.pendingWrite\[key\])\)' "$ctl"; then
+# writeParam is the ONLY place allowed to call setParam with a param key: it is
+# the one function that knows whether a step is held. Its own base-value write
+# is the single legitimate occurrence.
+if [ "$(rg -c 'setParam\(fullKey\(key\), wire\)' "$ctl" || true)" != "1" ]; then
   echo "FAIL: a controller write bypasses writeParam — it can land on the base while a step is held" >&2
+  exit 1
+fi
+if ! rg -n 'function writeParam' -A12 "$ctl" | rg -q 'setParam\(fullKey\(key\), wire\)'; then
+  echo "FAIL: the one permitted base write is not the one inside writeParam" >&2
   exit 1
 fi
 

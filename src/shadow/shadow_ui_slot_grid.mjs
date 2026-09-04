@@ -251,16 +251,19 @@ export function lfoParams(lfoIndex, keyPrefix = "") {
  * repeat them twice per bar with no clue why — here it says 16, and you change
  * it. Rec is Elektron's live record: while on and the transport runs, every
  * knob move is also stamped as a lock on the step playing at that moment. It
- * is transient — the DSP drops it when the transport stops — which is why it
- * has no `default` and is never saved.
+ * NO ON/OFF, AND NO REC TOGGLE. Locks are always live — a parameter with no
+ * lock on the playing step plays its saved value, so "off" is what an empty
+ * lane already means, and a switch that only ever wants to be On is a question
+ * the user should not be asked. Recording is armed by Move's RECORD button,
+ * the way it is on the machines this imitates, not by hunting through a menu.
+ * Both keys still exist on the engine for tests and for the web panel.
+ *
+ * What is left is the pair that CANNOT be inferred: how long the clip is and
+ * how fast its steps run. See the note on lock_step_at.
  */
 export function lockParams(keyPrefix = "") {
     const k = (name) => `${keyPrefix}lock:${name}`;
     return [
-        { key: k("enabled"), name: "Locks", type: "enum",
-          options: ["Off", "On"], short_options: ["OFF", "ON"] },
-        { key: k("rec"), name: "Rec", type: "enum",
-          options: ["Off", "On"], short_options: ["OFF", "REC"] },
         { key: k("pattern_len"), name: "Steps", type: "int", min: 1, max: 64, step: 1, default: 16 },
         { key: k("rate_div"), name: "Rate", type: "enum",
           options: LFO_DIVISIONS, short_options: LFO_DIVISIONS_SHORT },

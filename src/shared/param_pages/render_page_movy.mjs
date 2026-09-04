@@ -2403,7 +2403,7 @@ function resolveGeom(geom) {
  */
 export function drawKnobRow(ctx, o, row, rowY, lblY, geom) {
     const g = resolveGeom(geom);
-    const { page, metaIndex, values, touched, modulated, viz, modValues, decorations } = o;
+    const { page, metaIndex, values, touched, modulated, hasLocks, viz, modValues, decorations } = o;
     /*
      * EVERY held knob inverts, not just the one the header follows. A single
      * index could not express two fingers: touching a second knob overwrote it
@@ -2698,6 +2698,15 @@ export function drawKnobRow(ctx, o, row, rowY, lblY, geom) {
          * graphics down while decorations are live precisely so a picture
          * cannot hide which of the cells it spans is locked. */
         if (locked) ctx.fillRect(cellLeft(g, col) + 1, rowY, 2, 2, 1);
+        /* AUTOMATION MARK — "this parameter has a lock on some step", which is
+         * a standing fact about the parameter rather than the momentary one
+         * `modulated` reports. Bottom-left, so it cannot be confused with the
+         * held-step mark above it or the modulation dot on the knob, and so a
+         * row of cells shows at a glance which ones carry automation. Drawn
+         * even while nothing is playing: that is when you most need to know. */
+        else if (hasLocks && hasLocks(key)) {
+            ctx.fillRect(cellLeft(g, col) + 1, rowY + BOX_H - 3, 2, 2, 1);
+        }
 
         /*
          * `short_name` is for the CELL only -- the same split as short_options.

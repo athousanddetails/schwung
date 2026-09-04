@@ -477,6 +477,9 @@ function drawCell(ctx, opts) {
      * the name; a cell cannot spare a character, so it gets a tick in the top
      * right corner instead. */
     if (modulated) ctx.fillRect(cellX + cellW - 3, y, 2, 2, 1);
+    /* Automation mark, bottom-left — the mirror of the modulation tick above
+     * right, and steady where that one is momentary. See render_page_movy. */
+    if (opts.hasLocks) ctx.fillRect(cellX + 1, y + h - 2, 2, 2, 1);
 
     const locked = decoration && decoration.locked;
     const value = (decoration && decoration.value !== undefined) ? decoration.value : raw;
@@ -583,6 +586,9 @@ function drawEmptyCell(ctx, cellX, y, cellW, h) {
  *                 show section structure rather than an undifferentiated row
  * @param {Function} [o.modulated] (key) => boolean; marks params an LFO or
  *                 modulation source is driving, as the list editor's "~" does
+ * @param {Function} [o.hasLocks] (key) => boolean; marks params holding a
+ *                 parameter lock on some step — a standing fact, unlike
+ *                 `modulated`, which is true only while something drives it
  * @param {string} [o.layout]   LAYOUT_DIAL (default) or LAYOUT_BAR
  * @param {boolean} [o.revealValues] dial layout only: show every value in place
  *                 of its label, for as long as a modifier is held
@@ -696,6 +702,7 @@ export function renderPage(ctx, o) {
             touched: touched === slot,
             revealValues: !!o.revealValues,
             decoration: o.decorations ? o.decorations[slot] : null,
+            hasLocks: o.hasLocks ? !!o.hasLocks(key) : false,
         });
     }
 }

@@ -3489,8 +3489,16 @@ the shim remembers the exact string it displaced, putting it back when the step
 passes. Master locks are saved in the master preset beside its LFO configs.
 Lane targets are `fx1`…`fxN` by master position.
 
-**Live recording.** Press Move's **Record** button while a Schwung slot is
-focused — Move arms its own clip recording on the same press; this is the
+**Tap edits the trig, hold places a lock.** Schwung claims the step buttons
+while its UI is on screen, which blocks them from Move — so a press is held
+back and judged on release. Short, with no knob turned while it was down, is a
+tap: a press+release pair is injected to Move so the trig toggles exactly as it
+always did, and that step's locks are cleared with it, because a lock under a
+trig that is gone is invisible junk. Anything longer, or anything with a knob
+turn in it, was a lock gesture and Move never hears about it.
+
+**Live recording.** Press Move's **Record** button (CC 86 — *not* CC 118, which
+is Sample) while a Schwung slot is focused — Move arms its own clip recording on the same press; this is the
 Schwung half — or turn `Rec` on. While the transport runs, every knob move is
 also stamped as a lock on the step playing at that moment, Elektron-style: the
 steps you pass keep the values you passed them with, the base keeps moving so

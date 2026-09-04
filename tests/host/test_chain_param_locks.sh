@@ -132,12 +132,12 @@ if rg -q '"rec"' "$common"; then
   exit 1
 fi
 # Move's Record button arms it, in the shim, so a module-owned grid gets it too.
-if ! rg -n 'd1 == 118 && d2 > 0' -A22 src/schwung_shim.c | rg -q '"lock:rec"'; then
-  echo "FAIL: Record (CC 118) does not toggle lock:rec on the focused slot" >&2
+if ! rg -n 'd1 == 86 && d2 > 0' -A22 src/schwung_shim.c | rg -q '"lock:rec"'; then
+  echo "FAIL: Record does not toggle lock:rec on the focused slot" >&2
   exit 1
 fi
 # ...and the MASTER bus, on the same button, when master is the focused screen.
-if ! rg -n 'd1 == 118 && d2 > 0' -A8 src/schwung_shim.c | rg -q 'shadow_master_fx_lock_toggle_rec\(\)'; then
+if ! rg -n 'd1 == 86 && d2 > 0' -A8 src/schwung_shim.c | rg -q 'shadow_master_fx_lock_toggle_rec\(\)'; then
   echo "FAIL: Record does not arm the master engine while master is focused" >&2
   exit 1
 fi
@@ -228,4 +228,43 @@ if ! rg -n '"master_fx:lock_config"' -A2 src/shadow/shadow_ui.js | rg -q 'preset
   exit 1
 fi
 
-echo "PASS: chain parameter locks are absolute, non-destructive, explicitly timed, recordable, settable, and present on the master bus"
+# RECORD IS CC 86. CC 118 is the SAMPLE button; the docs note it doubles as
+# Record on SOME firmwares and constants.mjs carries both names, which is how
+# this was wired to the wrong one — Record did nothing at all on the device
+# while the engine behind it recorded perfectly when armed by hand.
+if ! rg -q 'd1 == 86 && d2 > 0' src/schwung_shim.c; then
+  echo "FAIL: Record is not CC 86" >&2
+  exit 1
+fi
+if rg -q 'd1 == 118 && d2 > 0' src/schwung_shim.c; then
+  echo "FAIL: the Sample button (CC 118) is being treated as Record" >&2
+  exit 1
+fi
+
+# A TAPPED step still reaches Move. Claiming the steps for locks would
+# otherwise take Move's own trig editing away for as long as the Schwung screen
+# is up, which nobody asked for.
+if ! rg -q 'was_tap && shadow_midi_inject_shm' src/schwung_shim.c; then
+  echo "FAIL: a tapped step is not injected back to Move — trig editing is lost" >&2
+  exit 1
+fi
+# ...and a knob turn during the hold makes it a LOCK, never a tap.
+if ! rg -q 'lock_step_knob_seen\[si\] = 1;' src/schwung_shim.c; then
+  echo "FAIL: a knob turn during a held step does not disqualify the tap" >&2
+  exit 1
+fi
+# The tap takes that step's locks with it, on both buses.
+if ! rg -q '"lock:clear_step"' src/schwung_shim.c; then
+  echo "FAIL: a tapped step does not clear its locks on a slot" >&2
+  exit 1
+fi
+if ! rg -q 'shadow_master_fx_lock_clear_step\(si\)' src/schwung_shim.c; then
+  echo "FAIL: a tapped step does not clear its locks on the master bus" >&2
+  exit 1
+fi
+if ! rg -q 'strcmp\(subkey, "clear_step"\) == 0' "$host"; then
+  echo "FAIL: the chain has no lock:clear_step" >&2
+  exit 1
+fi
+
+echo "PASS: chain parameter locks are absolute, non-destructive, explicitly timed, recordable, settable, clearable per step, and present on the master bus"

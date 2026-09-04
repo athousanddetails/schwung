@@ -1316,23 +1316,34 @@ int shadow_focused_captures_note(uint8_t note)
     shadow_control_t *shadow_control = *host_shadow_control;
     if (!shadow_control) return 0;
 
+    /* THE STEP BUTTONS BELONG TO SCHWUNG WHILE SCHWUNG'S UI IS UP.
+     *
+     * Parameter locks are a HOST feature: hold a step, turn a knob, and the
+     * value belongs to that step — on any module, on the master bus, with
+     * nothing for a module to declare. The first cut hung them off the patch's
+     * `capture: {groups:["steps"]}`, which made them per-machine and proved it
+     * the hard way: 9W9 dropped that block when its own sequencer was removed
+     * — correctly, it was the sequencer's — and every lock silently stopped
+     * working, on a module that had them the day before. Load a different drum
+     * kit and they were never there at all.
+     *
+     * So the claim is Schwung's own, made here at the routing decision, and
+     * scoped by the ONE thing that means "the user is working in Schwung
+     * rather than in Move": the shadow UI is on screen. Dismiss it and Move
+     * has all sixteen buttons back, unchanged. That is the same trade a patch
+     * used to opt into, made once, for everything.
+     *
+     * Deliberately NOT done by widening the per-slot or per-module capture
+     * predicates: those answer "did this patch or module ask for this
+     * control", a different question, and test_master_fx_permute rightly
+     * guards one of them against becoming a blanket yes. */
+    if (note >= CAPTURE_STEPS_NOTE_MIN && note <= CAPTURE_STEPS_NOTE_MAX &&
+        shadow_control->display_mode) {
+        return 1;
+    }
+
     int slot = shadow_control->ui_slot;
     if (slot == SHADOW_CHAIN_INSTANCES) {
-        /* THE STEP BUTTONS ARE MASTER'S WHILE MASTER IS FOCUSED.
-         *
-         * Parameter locks need a held step, and the master bus has no patch to
-         * declare `capture: {groups:["steps"]}` in — its modules are audio FX
-         * that know nothing about a sequencer. So the claim is made HERE, at
-         * the routing decision, and not by widening
-         * shadow_master_fx_captures_note: that predicate answers "did a loaded
-         * MODULE ask for this control", a different question, and a test
-         * rightly guards it against becoming a blanket yes.
-         *
-         * Scoped to the one screen where holding a step means something —
-         * this branch is only reached on ui_slot == SHADOW_CHAIN_INSTANCES —
-         * so Move keeps its steps everywhere else. Same trade a slot patch
-         * makes by opting in. */
-        if (note >= CAPTURE_STEPS_NOTE_MIN && note <= CAPTURE_STEPS_NOTE_MAX) return 1;
         return shadow_master_fx_captures_note(note);
     }
     if (slot >= 0 && slot < SHADOW_CHAIN_INSTANCES) {

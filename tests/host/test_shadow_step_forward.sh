@@ -21,13 +21,36 @@ if ! rg -q 'd1 >= CAPTURE_STEPS_NOTE_MIN && d1 <= CAPTURE_STEPS_NOTE_MAX' "$shim
   exit 1
 fi
 
-# GATED ON CAPTURE. Steps belong to Move's own sequencer; a patch takes them by
-# declaring capture:{groups:["steps"]}, which already blocks them from Move.
-# Forwarding without that test would be a new claim on the surface rather than
-# a listener on one the patch has already made.
+# GATED ON THE PREDICATE, which is where the policy lives.
 if ! rg -n 'd1 >= CAPTURE_STEPS_NOTE_MIN && d1 <= CAPTURE_STEPS_NOTE_MAX' -A2 "$shim" \
      | rg -q 'shadow_focused_captures_note\(d1\)'; then
   echo "FAIL: step forward is not gated on the focused slot capturing steps" >&2
+  exit 1
+fi
+
+# PARAMETER LOCKS ARE A HOST FEATURE, NOT A PER-MODULE ONE.
+#
+# The first cut hung the claim off the patch's capture:{groups:["steps"]}. That
+# made locks per-machine and proved it the hard way: 9W9 dropped that block
+# when its own step sequencer was removed — correctly, it belonged to the
+# sequencer — and every lock silently stopped working on a module that had them
+# the day before. Load a different drum kit and they were never there at all.
+#
+# So Schwung claims the steps itself, scoped to "the shadow UI is on screen",
+# which is the one signal meaning the user is working in Schwung rather than in
+# Move. Dismiss it and Move has all sixteen buttons back.
+midi="src/host/shadow_midi.c"
+if ! rg -n 'note >= CAPTURE_STEPS_NOTE_MIN && note <= CAPTURE_STEPS_NOTE_MAX' -A2 "$midi" \
+     | rg -q 'shadow_control->display_mode'; then
+  echo "FAIL: locks depend on a per-module capture declaration again — they must be Schwung's own claim" >&2
+  exit 1
+fi
+# ...and it must not need any module or patch to have asked: the claim sits
+# BEFORE the per-slot and per-module predicates, not inside them.
+claim_line=$(rg -n 'note >= CAPTURE_STEPS_NOTE_MIN && note <= CAPTURE_STEPS_NOTE_MAX' "$midi" | head -n 1 | cut -d: -f1)
+slot_line=$(rg -n 'capture_has_note\(&host_chain_slots' "$midi" | head -n 1 | cut -d: -f1)
+if [ -z "$claim_line" ] || [ -z "$slot_line" ] || [ "$claim_line" -ge "$slot_line" ]; then
+  echo "FAIL: the Schwung-wide step claim is not ahead of the per-slot capture rules" >&2
   exit 1
 fi
 

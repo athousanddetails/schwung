@@ -148,8 +148,11 @@ if rg -n 'int shadow_master_fx_captures_note' -A4 src/host/shadow_chain_mgmt.c |
   echo "FAIL: the master step claim widened the module-declaration predicate" >&2
   exit 1
 fi
-if ! rg -n 'slot == SHADOW_CHAIN_INSTANCES' -A18 src/host/shadow_midi.c | rg -q 'note >= CAPTURE_STEPS_NOTE_MIN && note <= CAPTURE_STEPS_NOTE_MAX'; then
-  echo "FAIL: master does not claim the step buttons while it is the focused screen" >&2
+# The claim is Schwung-wide now — it covers master and every slot alike, ahead
+# of the per-slot rules — so master needs no special case of its own.
+if ! rg -n 'note >= CAPTURE_STEPS_NOTE_MIN && note <= CAPTURE_STEPS_NOTE_MAX' -A2 src/host/shadow_midi.c \
+     | rg -q 'shadow_control->display_mode'; then
+  echo "FAIL: the step claim is not Schwung-wide" >&2
   exit 1
 fi
 

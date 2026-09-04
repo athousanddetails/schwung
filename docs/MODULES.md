@@ -3429,6 +3429,17 @@ does.
 }
 ```
 
+**No module declares anything.** Parameter locks are a host feature: the step
+buttons belong to Schwung whenever the shadow UI is on screen, on any module and
+on the master bus, with nothing for a module to opt into. Dismiss the shadow UI
+and Move has all sixteen buttons back.
+
+This was originally hung off a patch's `capture: {groups: ["steps"]}`, which
+made locks per-machine and proved it the hard way: 9W9 dropped that block when
+its own step sequencer was removed — correctly, it belonged to the sequencer —
+and every lock silently stopped working on a module that had them the day
+before. Loading a different drum kit meant they had never been there at all.
+
 **Every grid gets the gesture.** The editor half lives in the shared
 `page_controller` (`onStepButton`), fed by `page_input`'s `step` intent — so a
 module that draws its own grid through `createController` + `decodeInput` +

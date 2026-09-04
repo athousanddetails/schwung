@@ -2676,6 +2676,24 @@ void shadow_master_fx_lock_clear_all(void) {
 
 /* Move's Record button, on the master bus. Same toggle the chain does for a
  * slot; kept here because shadow_master_fx_locks is this file's state. */
+void shadow_master_fx_lock_clear_step(int step) {
+    lock_state_t *st = &shadow_master_fx_locks;
+    if (step < 0 || step >= LOCK_MAX_STEPS) return;
+
+    for (int i = 0; i < st->lane_count && i < LOCK_MAX_LANES; i++) {
+        lock_lane_t *lane = &st->lanes[i];
+        if (!lock_lane_has_step(lane, step)) continue;
+        lock_lane_clear(lane, step);
+        if (lane->mask == 0) {
+            /* Restore BEFORE retiring: the restore needs the lane's target and
+             * param, and lock_retire_lane_if_empty memsets them away. */
+            mfx_lock_restore(i, lane);
+            lock_retire_lane_if_empty(st, lane);
+        }
+    }
+    st->cur_step = LOCK_STEP_NONE;
+}
+
 void shadow_master_fx_lock_toggle_rec(void) {
     shadow_master_fx_locks.rec = shadow_master_fx_locks.rec ? 0 : 1;
 }

@@ -844,6 +844,16 @@ static struct timespec menu_press_time;
 static uint8_t menu_longpress_pending;
 static uint8_t menu_longpress_fired;
 
+/* Parameter-lock step gesture. Schwung claims the step buttons while its UI is
+ * up, which would otherwise take Move's own trig editing away entirely — so a
+ * press is held back, and a short tap with no knob turned is injected to Move
+ * on release as a crisp press+release pair. Tap edits the trig, hold places a
+ * lock; the two never collide. */
+#define LOCK_STEP_TAP_MS 300
+static struct timespec lock_step_press_time[16];
+static uint8_t lock_step_pressed[16];
+static uint8_t lock_step_knob_seen[16];
+
 static struct timespec step2_press_time;
 static uint8_t step2_longpress_pending;
 static uint8_t step2_longpress_fired;
@@ -8611,7 +8621,20 @@ static void shim_post_transfer(void *ctx, uint8_t *shadow, const uint8_t *hw, in
                  * while a module draws its own grid. The chain drops the flag
                  * when the transport stops, so the two cannot drift for long.
                  * The press still reaches Move: nothing here swallows it. */
-                if (d1 == 118 && d2 > 0 && shadow_control) {
+                /* A knob turn while a step is held makes the gesture a LOCK,
+                 * so that step must not also toggle Move's trig on release. */
+                if (d1 >= 71 && d1 <= 78) {
+                    for (int si = 0; si < 16; si++) {
+                        if (lock_step_pressed[si]) lock_step_knob_seen[si] = 1;
+                    }
+                }
+
+                /* RECORD is CC 86. CC 118 is the SAMPLE button — the docs note
+                 * it doubles as Record on SOME firmwares, and constants.mjs
+                 * carries both names, which is how this was wired to the wrong
+                 * one: pressing Record did nothing at all while the engine
+                 * behind it recorded perfectly when armed by hand. */
+                if (d1 == 86 && d2 > 0 && shadow_control) {
                     int slot = shadow_control->ui_slot;
                     if (slot == SHADOW_CHAIN_INSTANCES) {
                         /* Master focused: arm the master engine. Same button,
@@ -8692,8 +8715,72 @@ static void shim_post_transfer(void *ctx, uint8_t *shadow, const uint8_t *hw, in
                  * forwarded: they are Move's performance surface and are
                  * already handled by the pad_block path above. */
                 if (d1 >= CAPTURE_STEPS_NOTE_MIN && d1 <= CAPTURE_STEPS_NOTE_MAX &&
-                    shadow_ui_midi_shm && shadow_focused_captures_note(d1)) {
-                    shadow_ui_midi_publish((type == 0x90) ? 0x09 : 0x08, status, d1, d2);
+                    shadow_focused_captures_note(d1)) {
+                    const int si = d1 - CAPTURE_STEPS_NOTE_MIN;
+                    const int down = (type == 0x90 && d2 > 0);
+
+                    if (shadow_ui_midi_shm) {
+                        shadow_ui_midi_publish((type == 0x90) ? 0x09 : 0x08, status, d1, d2);
+                    }
+
+                    /*
+                     * TAP EDITS THE TRIG, HOLD PLACES A LOCK.
+                     *
+                     * Schwung claims the step buttons while its UI is up, which
+                     * blocks them from Move — and that alone would take Move's
+                     * own trig editing away for as long as the Schwung screen
+                     * is showing. Nobody asked for that.
+                     *
+                     * A press cannot be classified when it arrives, so it is
+                     * held back and judged on release: short, and with no knob
+                     * turned while it was down, is a TAP, and a crisp
+                     * press+release pair is injected so Move toggles the trig
+                     * exactly as it always did. Anything longer, or anything
+                     * with a knob turn in it, was a lock gesture and Move never
+                     * hears about it.
+                     *
+                     * The tap also clears that step's locks: on Move a tap is
+                     * how a trig is removed, and a lock sitting under a trig
+                     * that is gone is invisible junk that would come back the
+                     * moment the trig did.
+                     */
+                    if (down) {
+                        clock_gettime(CLOCK_MONOTONIC, &lock_step_press_time[si]);
+                        lock_step_pressed[si] = 1;
+                        lock_step_knob_seen[si] = 0;
+                    } else if (lock_step_pressed[si]) {
+                        struct timespec now_ts;
+                        clock_gettime(CLOCK_MONOTONIC, &now_ts);
+                        const long held_ms =
+                            (now_ts.tv_sec - lock_step_press_time[si].tv_sec) * 1000L +
+                            (now_ts.tv_nsec - lock_step_press_time[si].tv_nsec) / 1000000L;
+                        const int was_tap = (held_ms < LOCK_STEP_TAP_MS) && !lock_step_knob_seen[si];
+                        lock_step_pressed[si] = 0;
+                        lock_step_knob_seen[si] = 0;
+
+                        if (was_tap && shadow_midi_inject_shm) {
+                            uint8_t prs[4] = { 0x09, 0x90, (uint8_t)d1, 127 };
+                            uint8_t rel[4] = { 0x08, 0x80, (uint8_t)d1, 0 };
+                            shadow_midi_inject_push(shadow_midi_inject_shm, prs);
+                            shadow_midi_inject_push(shadow_midi_inject_shm, rel);
+
+                            /* ...and the step's locks go with the trig. */
+                            if (shadow_control) {
+                                char sv[8];
+                                snprintf(sv, sizeof(sv), "%d", si);
+                                int uslot = shadow_control->ui_slot;
+                                if (uslot == SHADOW_CHAIN_INSTANCES) {
+                                    shadow_master_fx_lock_clear_step(si);
+                                } else if (uslot >= 0 && uslot < SHADOW_CHAIN_INSTANCES &&
+                                           shadow_plugin_v2 && shadow_plugin_v2->set_param &&
+                                           shadow_chain_slots[uslot].active &&
+                                           shadow_chain_slots[uslot].instance) {
+                                    shadow_plugin_v2->set_param(shadow_chain_slots[uslot].instance,
+                                                                "lock:clear_step", sv);
+                                }
+                            }
+                        }
+                    }
                 }
 
                 /* Check capture rules for focused slot.

@@ -1229,6 +1229,26 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
                     }
                 }
             }
+        } else if (strcmp(subkey, "clear_step") == 0 && val) {
+            /* Every lane's lock on ONE step. Tapping a step button is how a
+             * user removes its trig on Move, and a lock under a trig that is
+             * gone is invisible junk that would come back the moment the trig
+             * did — so the tap clears the step here too. */
+            const int step = atoi(val);
+            if (step >= 0 && step < LOCK_MAX_STEPS) {
+                char source_id[8];
+                for (int i = 0; i < st->lane_count && i < LOCK_MAX_LANES; i++) {
+                    lock_lane_t *lane = &st->lanes[i];
+                    if (!lock_lane_has_step(lane, step)) continue;
+                    lock_lane_clear(lane, step);
+                    if (lane->mask == 0) {
+                        lock_source_id(i, source_id, sizeof(source_id));
+                        chain_mod_clear_source(inst, source_id);
+                        lock_retire_lane_if_empty(st, lane);
+                    }
+                }
+                st->cur_step = LOCK_STEP_NONE;
+            }
         } else if (strcmp(subkey, "clear_all") == 0) {
             lock_clear_all(inst);
         }

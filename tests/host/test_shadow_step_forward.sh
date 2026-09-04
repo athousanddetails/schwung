@@ -62,11 +62,20 @@ if rg -n 'd1 >= CAPTURE_STEPS_NOTE_MIN' -A3 "$shim" | rg -q 'CAPTURE_PADS_NOTE_M
   exit 1
 fi
 
-# The DSP still receives the step. The slot's own sequencer (9W9 has one) reads
-# these, so the forward must be an ADDITION, not a diversion.
-if ! rg -n 'shadow_ui_midi_publish\(\(type == 0x90\) \? 0x09 : 0x08, status, d1, d2\);' -A6 "$shim" \
-     | rg -q 'shadow_focused_captures_note\(d1\)'; then
+# The DSP still receives the step: the forward to the UI is an ADDITION, not a
+# diversion. Asserted as the routing block existing under the capture guard,
+# rather than by proximity to the publish line — the two moved apart when taps
+# learned to reach Move and the textual check silently became a layout test.
+if ! rg -n 'd1 >= 10 && shadow_focused_captures_note\(d1\)' -A10 "$shim" \
+     | rg -q 'shadow_plugin_v2->on_midi\(shadow_chain_slots\[slot\].instance'; then
   echo "FAIL: captured steps must still reach the slot's DSP" >&2
+  exit 1
+fi
+
+# A tapped step is injected back to Move as a PRESS+RELEASE pair, not a bare
+# note-on: Move must never be handed a press it never sees closed.
+if ! rg -n 'was_tap && shadow_midi_inject_shm' -A6 "$shim" | rg -q '0x08, 0x80'; then
+  echo "FAIL: a tapped step is injected without its release" >&2
   exit 1
 fi
 
